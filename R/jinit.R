@@ -4,46 +4,119 @@
 ##
 ## $Id$
 
-.check.JVM <- function() 
-    .Call(RJava_checkJVM)
-.need.init <- function()
-    .Call(RJava_needs_init)
+.check.JVM <- function() {
+  .Call(RJava_checkJVM)
+}
+.need.init <- function() {
+  .Call(RJava_needs_init)
+}
 
-.jloadJVM <- function(path, silent=FALSE)
+.jloadJVM <- function(path, silent = FALSE) {
   .Call(RloadJVM, path.expand(path), silent)
+}
 
-.junloadJVM <- function()
+.junloadJVM <- function() {
   .Call(RunloadJVM)
+}
 
 .jfindAndLoadJVM <- function() {
+  # Platform dispatch
+  if (.Platform$OS.type == "windows") {
+    # Try to find JAVA_HOME using the logic we put in FirstLib.R or Sys.getenv
+    # Since .find.java.runtime is internal, we might need to duplicate logic or export it.
+    # Ideally, check JAVA_HOME env first (user might have set it after loading rJava)
+    home <- Sys.getenv("JAVA_HOME")
+
+    if (!nzchar(home)) {
+      # Try to recover using the logic from FirstLib if available, or simple registry check
+      # For simplicity, we assume the user sets JAVA_HOME if automatic detection failed in .onLoad
+      # But we can try to call the internal helper if we are inside the package
+      if (exists(".find.java.runtime", envir = asNamespace("rJava"))) {
+        home <- asNamespace("rJava")$.find.java.runtime()
+      }
+    }
+
+    if (is.null(home) || !nzchar(home)) {
+      stop(
+        "JAVA_HOME cannot be determined from the Registry or JAVA_HOME environment variable."
+      )
+    }
+
+    # Look for jvm.dll
+    libjvm <- list.files(
+      home,
+      "^jvm\\.dll$",
+      recursive = TRUE,
+      full.names = TRUE
+    )
+    if (!length(libjvm)) {
+      stop("Cannot find jvm.dll in ", home)
+    }
+
+    # Pick the one that matches architecture (simplistic check, ideally check arch path)
+    # Usually list.files finds bin/server/jvm.dll
+    dll <- libjvm[1]
+    message("Loading JVM from ", dll)
+    .jloadJVM(dll)
+  } else {
     home <- Sys.getenv("JAVA_HOME")
     if (!nzchar(home) || !isTRUE(dir.exists(home))) {
-        ## try java_home first if present
-        if (file.exists("/usr/libexec/java_home")) {
-	    home <- tryCatch(system("/usr/libexec/java_home", intern=TRUE, ignore.stderr=TRUE),
-	                     error=function(...) "")
-	}
-	## otherwise rely on java in PATH
-        if (!nzchar(home) || !isTRUE(dir.exists(home))) {
-	    home <- tryCatch(system(paste("java", "-cp",
-	        shQuote(system.file("java", package="rJava")), "getsp", "java.home"),
-	        intern=TRUE, ignore.stderr=TRUE), error=function(...) "")
-	}
+      ## try java_home first if present
+      if (file.exists("/usr/libexec/java_home")) {
+        home <- tryCatch(
+          system("/usr/libexec/java_home", intern = TRUE, ignore.stderr = TRUE),
+          error = function(...) ""
+        )
+      }
+      ## otherwise rely on java in PATH
+      if (!nzchar(home) || !isTRUE(dir.exists(home))) {
+        home <- tryCatch(
+          system(
+            paste(
+              "java",
+              "-cp",
+              shQuote(system.file("java", package = "rJava")),
+              "getsp",
+              "java.home"
+            ),
+            intern = TRUE,
+            ignore.stderr = TRUE
+          ),
+          error = function(...) ""
+        )
+      }
     }
-    if (!nzchar(home) || !isTRUE(dir.exists(home)))
-        stop("Cannot find Java. Either make sure java executable is on the PATH or set the JAVA_HOME environment variable.")
-    libjvm <- list.files(home, "^libjvm[.]", recursive=TRUE, full.names=TRUE)
-    if (!length(libjvm))
-        stop("Cannot find libjvm in ", home)
+    if (!nzchar(home) || !isTRUE(dir.exists(home))) {
+      stop(
+        "Cannot find Java. Either make sure java executable is on the PATH or set the JAVA_HOME environment variable."
+      )
+    }
+    libjvm <- list.files(
+      home,
+      "^libjvm[.]",
+      recursive = TRUE,
+      full.names = TRUE
+    )
+    if (!length(libjvm)) {
+      stop("Cannot find libjvm in ", home)
+    }
     message("Loading JVM from ", home)
     .jloadJVM(libjvm[1])
+  }
 }
 
 ## initialization
-.jinit <- function(classpath=NULL, parameters=getOption("java.parameters"), ..., silent=FALSE, force.init=FALSE) {
+.jinit <- function(
+  classpath = NULL,
+  parameters = getOption("java.parameters"),
+  ...,
+  silent = FALSE,
+  force.init = FALSE
+) {
   st <- .jvmState()
-  if (st$state == "not-loaded")
-     .jfindAndLoadJVM()
+  if (st$state == "not-loaded") {
+    .jfindAndLoadJVM()
+  }
   running.classpath <- character()
   if (!.need.init()) {
     running.classpath <- .jclassPath()
@@ -61,33 +134,53 @@
 
   if (!is.null(classpath)) {
     classpath <- as.character(classpath)
-    if (length(classpath))
-      classpath <- paste(classpath,collapse=path.sep)
+    if (length(classpath)) {
+      classpath <- paste(classpath, collapse = path.sep)
+    }
   }
-  
+
   # merge CLASSPATH environment variable if present
-  cp<-Sys.getenv("CLASSPATH")
+  cp <- Sys.getenv("CLASSPATH")
   if (!is.null(cp)) {
-    if (is.null(classpath))
-      classpath<-cp
-    else
-      classpath<-paste(classpath,cp,sep=path.sep)
+    if (is.null(classpath)) {
+      classpath <- cp
+    } else {
+      classpath <- paste(classpath, cp, sep = path.sep)
+    }
   }
-  
+
   # set rJava/java/boot for boostrap (so we can get RJavaClassLoader)
-  boot.classpath <- file.path(.rJava.base.path,"java","boot")
+  boot.classpath <- file.path(.rJava.base.path, "java", "boot")
 
   # if running in a sub-arch, append -Dr.arch in case someone gets the idea to start JRI
-  if (is.character(.Platform$r_arch) && nzchar(.Platform$r_arch) && length(grep("-Dr.arch", parameters, fixed=TRUE)) == 0L)
-    parameters <- c(paste("-Dr.arch=/", .Platform$r_arch, sep=''), as.character(parameters))
+  if (
+    is.character(.Platform$r_arch) &&
+      nzchar(.Platform$r_arch) &&
+      length(grep("-Dr.arch", parameters, fixed = TRUE)) == 0L
+  ) {
+    parameters <- c(
+      paste("-Dr.arch=/", .Platform$r_arch, sep = ''),
+      as.character(parameters)
+    )
+  }
 
   ## unfortunately Sys/setlocale()/Sys.getlocale() have incompatible interfaces so there
   ## is no good way to get/set locales -- so we have to hack around it ...
-  locale.list <- c("LC_COLLATE", "LC_CTYPE", "LC_MONETARY", "LC_NUMERIC", "LC_TIME", "LC_MESSAGES", "LC_PAPER", "LC_MEASUREMENT")
+  locale.list <- c(
+    "LC_COLLATE",
+    "LC_CTYPE",
+    "LC_MONETARY",
+    "LC_NUMERIC",
+    "LC_TIME",
+    "LC_MESSAGES",
+    "LC_PAPER",
+    "LC_MEASUREMENT"
+  )
   ## RStudio on Windows crashes due to missing error handlers if locales
   ## are queried that Windows does not support so we remove those to work around it
-  if (identical(.Platform$OS.type, "windows"))
-      locale.list <- locale.list[-(6:8)]
+  if (identical(.Platform$OS.type, "windows")) {
+    locale.list <- locale.list[-(6:8)]
+  }
   locales <- sapply(locale.list, Sys.getlocale)
   loc.sig <- Sys.getlocale()
 
@@ -97,73 +190,167 @@
   xr <- .External(RinitJVM, boot.classpath, parameters)
 
   ## we have to re-set the locales right away
-  suppressWarnings(try(if (!identical(Sys.getlocale(), loc.sig)) for (i in names(locales)) try(Sys.setlocale(i, locales[i]), silent=TRUE),
-      silent=TRUE))
+  suppressWarnings(try(
+    if (!identical(Sys.getlocale(), loc.sig)) {
+      for (i in names(locales)) {
+        try(Sys.setlocale(i, locales[i]), silent = TRUE)
+      }
+    },
+    silent = TRUE
+  ))
 
-  if (xr==-1) stop("Unable to initialize JVM.")
-  if (xr==-2) stop("Another VM is already running and rJava was unable to attach to that VM.")
+  if (xr == -1) {
+    stop("Unable to initialize JVM.")
+  }
+  if (xr == -2) {
+    stop(
+      "Another VM is already running and rJava was unable to attach to that VM."
+    )
+  }
   # we'll handle xr==1 later because we need fully initialized rJava for that
 
   # this should remove any lingering .jclass objects from the global env
   # left there by previous versions of rJava
-  pj <- grep("^\\.jclass",ls(1,all.names=TRUE),value=TRUE)
-  if (length(pj)>0) { 
-    rm(list=pj,pos=1)
-    if (exists(".jniInitialized",1)) rm(list=".jniInitialized",pos=1)
-    if (!silent) warning("rJava found hidden Java objects in your workspace. Internal objects from previous versions of rJava were deleted. Please note that Java objects cannot be saved in the workspace.")
+  pj <- grep("^\\.jclass", ls(1, all.names = TRUE), value = TRUE)
+  if (length(pj) > 0) {
+    rm(list = pj, pos = 1)
+    if (exists(".jniInitialized", 1)) {
+      rm(list = ".jniInitialized", pos = 1)
+    }
+    if (!silent) {
+      warning(
+        "rJava found hidden Java objects in your workspace. Internal objects from previous versions of rJava were deleted. Please note that Java objects cannot be saved in the workspace."
+      )
+    }
   }
 
   ##--- HACK-WARNING: we're operating directly on the namespace environment
   ##                  this could be dangerous.
-  for (x in .delayed.variables) unlockBinding(x, .env)
+  for (x in .delayed.variables) {
+    unlockBinding(x, .env)
+  }
   assign(".jniInitialized", TRUE, .env)
   # get cached class objects for reflection
-  assign(".jclassObject", .jcall("java/lang/Class","Ljava/lang/Class;","forName","java.lang.Object"), .env)
-  assign(".jclassClass", .jcall("java/lang/Class","Ljava/lang/Class;","forName","java.lang.Class"), .env)
-  assign(".jclassString", .jcall("java/lang/Class","Ljava/lang/Class;","forName","java.lang.String"), .env)
+  assign(
+    ".jclassObject",
+    .jcall(
+      "java/lang/Class",
+      "Ljava/lang/Class;",
+      "forName",
+      "java.lang.Object"
+    ),
+    .env
+  )
+  assign(
+    ".jclassClass",
+    .jcall(
+      "java/lang/Class",
+      "Ljava/lang/Class;",
+      "forName",
+      "java.lang.Class"
+    ),
+    .env
+  )
+  assign(
+    ".jclassString",
+    .jcall(
+      "java/lang/Class",
+      "Ljava/lang/Class;",
+      "forName",
+      "java.lang.String"
+    ),
+    .env
+  )
 
-  assign(".jclass.int", .jfield("java/lang/Integer", "Ljava/lang/Class;", "TYPE"), .env)
-  assign(".jclass.double", .jfield("java/lang/Double", "Ljava/lang/Class;", "TYPE"), .env)
-  assign(".jclass.float", .jfield("java/lang/Float", "Ljava/lang/Class;", "TYPE"), .env)
-  assign(".jclass.boolean", .jfield("java/lang/Boolean", "Ljava/lang/Class;", "TYPE"), .env)
-  assign(".jclass.void", .jfield("java/lang/Void", "Ljava/lang/Class;", "TYPE"), .env)
+  assign(
+    ".jclass.int",
+    .jfield("java/lang/Integer", "Ljava/lang/Class;", "TYPE"),
+    .env
+  )
+  assign(
+    ".jclass.double",
+    .jfield("java/lang/Double", "Ljava/lang/Class;", "TYPE"),
+    .env
+  )
+  assign(
+    ".jclass.float",
+    .jfield("java/lang/Float", "Ljava/lang/Class;", "TYPE"),
+    .env
+  )
+  assign(
+    ".jclass.boolean",
+    .jfield("java/lang/Boolean", "Ljava/lang/Class;", "TYPE"),
+    .env
+  )
+  assign(
+    ".jclass.void",
+    .jfield("java/lang/Void", "Ljava/lang/Class;", "TYPE"),
+    .env
+  )
 
   ## if NOAWT is set, set AWT to headless
-  if (nzchar(Sys.getenv("NOAWT"))) .jcall("java/lang/System","S","setProperty","java.awt.headless","true")
+  if (nzchar(Sys.getenv("NOAWT"))) {
+    .jcall("java/lang/System", "S", "setProperty", "java.awt.headless", "true")
+  }
 
   lib <- "libs"
-  if (nchar(.Platform$r_arch)) lib <- file.path("libs", .Platform$r_arch)
+  if (nchar(.Platform$r_arch)) {
+    lib <- file.path("libs", .Platform$r_arch)
+  }
 
   rjcl <- NULL
-  if (xr==1) { # && nchar(classpath)>0) {
+  if (xr == 1) {
+    # && nchar(classpath)>0) {
     # ok, so we're attached to some other JVM - now we need to make sure that
     # we can load our class loader. If we can't then we have to use our bad hack
     # to be able to squeeze our loader in
 
     # first, see if this is actually JRIBootstrap so we have a loader already
     rjcl <- .Call(RJava_primary_class_loader)
-    if (is.null(rjcl) || .jidenticalRef(rjcl,.jzeroRef)) rjcl <- NULL
-    else rjcl <- new("jobjRef", jobj=rjcl, jclass="RJavaClassLoader")
-    if (is.jnull(rjcl))
-      rjcl <- .jnew("RJavaClassLoader", .rJava.base.path,
-                                      file.path(.rJava.base.path, lib), check=FALSE)
-    .jcheck(silent=TRUE)
+    if (is.null(rjcl) || .jidenticalRef(rjcl, .jzeroRef)) {
+      rjcl <- NULL
+    } else {
+      rjcl <- new("jobjRef", jobj = rjcl, jclass = "RJavaClassLoader")
+    }
+    if (is.jnull(rjcl)) {
+      rjcl <- .jnew(
+        "RJavaClassLoader",
+        .rJava.base.path,
+        file.path(.rJava.base.path, lib),
+        check = FALSE
+      )
+    }
+    .jcheck(silent = TRUE)
     if (is.jnull(rjcl)) {
       ## it's a hack, so we run it in try(..) in case BadThings(TM) happen ...
-      cpr <- try(.jmergeClassPath(boot.classpath), silent=TRUE)
+      cpr <- try(.jmergeClassPath(boot.classpath), silent = TRUE)
       if (inherits(cpr, "try-error")) {
-        .jcheck(silent=TRUE)
-        if (!silent) warning("Another VM is running already and the VM did not allow me to append paths to the class path.")
+        .jcheck(silent = TRUE)
+        if (!silent) {
+          warning(
+            "Another VM is running already and the VM did not allow me to append paths to the class path."
+          )
+        }
         assign(".jinit.merge.error", cpr, .env)
       }
-      if (length(parameters)>0 && any(parameters!=getOption("java.parameters")) && !silent)
+      if (
+        length(parameters) > 0 &&
+          any(parameters != getOption("java.parameters")) &&
+          !silent
+      ) {
         warning("Cannot set VM parameters, because VM is running already.")
+      }
     }
   }
 
-  if (is.jnull(rjcl))
-    rjcl <- .jnew("RJavaClassLoader", .rJava.base.path,
-                  file.path(.rJava.base.path, lib), check=FALSE )
+  if (is.jnull(rjcl)) {
+    rjcl <- .jnew(
+      "RJavaClassLoader",
+      .rJava.base.path,
+      file.path(.rJava.base.path, lib),
+      check = FALSE
+    )
+  }
 
   if (!is.jnull(rjcl)) {
     ## init class loader
@@ -175,16 +362,21 @@
     ## now it's time to add any additional class paths
     cpc <- unique(strsplit(classpath, .Platform$path.sep)[[1]])
     if (length(cpc)) .jaddClassPath(cpc)
-  } else stop("Unable to create a Java class loader.")
-  
+  } else {
+    stop("Unable to create a Java class loader.")
+  }
+
   ##.Call(RJava_new_class_loader, .rJava.base.path, file.path(.rJava.base.path, lib))
 
   ## lock namespace bindings
-  for (x in .delayed.variables) lockBinding(x, .env)
-  
+  for (x in .delayed.variables) {
+    lockBinding(x, .env)
+  }
+
   ## now we need to update the attached namespace (package env)  as well
   m <- match(paste("package", getNamespaceName(.env), sep = ":"), search())[1]
-  if (!is.na(m)) { ## only is it is attached
+  if (!is.na(m)) {
+    ## only is it is attached
     pe <- as.environment(m)
     for (x in .delayed.export.variables) {
       unlockBinding(x, pe)
@@ -192,15 +384,15 @@
       lockBinding(x, pe)
     }
   }
-  
-  # FIXME: is this the best place or should this be done 
+
+  # FIXME: is this the best place or should this be done
   #        internally right after the RJavaClassLoader is instantiated
   # init the cached RJavaTools class in the jni side
   .Call(initRJavaTools)
-  
+
   # not yet
   # import( c( "java.lang", "java.util") )
-  
+
   invisible(xr)
 }
 
@@ -208,7 +400,7 @@
 #        class loader strategy, we should add some sort of hook to let people
 #        define how they want this to be done
 .jmergeClassPath <- function(cp) {
-  ccp <- .jcall("java/lang/System","S","getProperty","java.class.path")
+  ccp <- .jcall("java/lang/System", "S", "getProperty", "java.class.path")
   ccpc <- strsplit(ccp, .Platform$path.sep)[[1]]
   cpc <- strsplit(cp, .Platform$path.sep)[[1]]
   rcp <- unique(cpc[!(cpc %in% ccpc)])
@@ -216,9 +408,11 @@
     # the loader requires directories to include trailing slash
     # Windows: need / or \ ? (untested)
     dirs <- which(file.info(rcp)$isdir)
-    for (i in dirs)
-      if (substr(rcp[i],nchar(rcp[i]),nchar(rcp[i]))!=.Platform$file.sep)
-        rcp[i]<-paste(rcp[i], .Platform$file.sep, sep='')
+    for (i in dirs) {
+      if (substr(rcp[i], nchar(rcp[i]), nchar(rcp[i])) != .Platform$file.sep) {
+        rcp[i] <- paste(rcp[i], .Platform$file.sep, sep = '')
+      }
+    }
 
     ## this is a hack, really, that exploits the fact that the system class loader
     ## is in fact a subclass of URLClassLoader and it also subverts protection
@@ -231,37 +425,89 @@
 
     ## it should probably be run in try(..) because chances are that it will
     ## break if Sun changes something...
-    cl <- .jcall("java/lang/ClassLoader", "Ljava/lang/ClassLoader;", "getSystemClassLoader")
-    urlc <- .jcall("java/lang/Class", "Ljava/lang/Class;", "forName", "java.net.URL")
-    clc <- .jcall("java/lang/Class", "Ljava/lang/Class;", "forName", "java.net.URLClassLoader")
-    ar <- .jcall("java/lang/reflect/Array", "Ljava/lang/Object;",
-                         "newInstance", .jclassClass, 1:1)
-    .jcall("java/lang/reflect/Array", "V", "set",
-                  .jcast(ar, "java/lang/Object"), 0:0,
-                  .jcast(urlc, "java/lang/Object"))
-    m<-.jcall(clc, "Ljava/lang/reflect/Method;", "getDeclaredMethod", "addURL", .jcast(ar,"[Ljava/lang/Class;"))
+    cl <- .jcall(
+      "java/lang/ClassLoader",
+      "Ljava/lang/ClassLoader;",
+      "getSystemClassLoader"
+    )
+    urlc <- .jcall(
+      "java/lang/Class",
+      "Ljava/lang/Class;",
+      "forName",
+      "java.net.URL"
+    )
+    clc <- .jcall(
+      "java/lang/Class",
+      "Ljava/lang/Class;",
+      "forName",
+      "java.net.URLClassLoader"
+    )
+    ar <- .jcall(
+      "java/lang/reflect/Array",
+      "Ljava/lang/Object;",
+      "newInstance",
+      .jclassClass,
+      1:1
+    )
+    .jcall(
+      "java/lang/reflect/Array",
+      "V",
+      "set",
+      .jcast(ar, "java/lang/Object"),
+      0:0,
+      .jcast(urlc, "java/lang/Object")
+    )
+    m <- .jcall(
+      clc,
+      "Ljava/lang/reflect/Method;",
+      "getDeclaredMethod",
+      "addURL",
+      .jcast(ar, "[Ljava/lang/Class;")
+    )
     .jcall(m, "V", "setAccessible", TRUE)
 
-    ar <- .jcall("java/lang/reflect/Array", "Ljava/lang/Object;",
-                 "newInstance", .jclassObject, 1:1)
-    
+    ar <- .jcall(
+      "java/lang/reflect/Array",
+      "Ljava/lang/Object;",
+      "newInstance",
+      .jclassObject,
+      1:1
+    )
+
     for (fn in rcp) {
       f <- .jnew("java/io/File", fn)
       url <- .jcall(f, "Ljava/net/URL;", "toURL")
-      .jcall("java/lang/reflect/Array", "V", "set",
-             .jcast(ar, "java/lang/Object"), 0:0,
-             .jcast(url, "java/lang/Object"))
-      .jcall(m, "Ljava/lang/Object;", "invoke",
-             .jcast(cl, "java/lang/Object"), .jcast(ar, "[Ljava/lang/Object;"))
+      .jcall(
+        "java/lang/reflect/Array",
+        "V",
+        "set",
+        .jcast(ar, "java/lang/Object"),
+        0:0,
+        .jcast(url, "java/lang/Object")
+      )
+      .jcall(
+        m,
+        "Ljava/lang/Object;",
+        "invoke",
+        .jcast(cl, "java/lang/Object"),
+        .jcast(ar, "[Ljava/lang/Object;")
+      )
     }
 
     # also adjust the java.class.path property to not confuse others
-    if (length(ccp)>1 || (length(ccp)==1 && nchar(ccp[1])>0))
+    if (length(ccp) > 1 || (length(ccp) == 1 && nchar(ccp[1]) > 0)) {
       rcp <- c(ccp, rcp)
-    acp <- paste(rcp, collapse=.Platform$path.sep)
-    .jcall("java/lang/System","S","setProperty","java.class.path",as.character(acp))
+    }
+    acp <- paste(rcp, collapse = .Platform$path.sep)
+    .jcall(
+      "java/lang/System",
+      "S",
+      "setProperty",
+      "java.class.path",
+      as.character(acp)
+    )
   } # if #rcp>0
-  invisible(.jcall("java/lang/System","S","getProperty","java.class.path"))
+  invisible(.jcall("java/lang/System", "S", "getProperty", "java.class.path"))
 }
 
 .jvmState <- function() .Call(RgetJVMstate)

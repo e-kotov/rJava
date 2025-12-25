@@ -1,3 +1,92 @@
+#ifdef _WIN32
+#include <windows.h>
+#include <stdio.h>
+#include "djni.h"
+
+static JNI_GetDefaultJavaVMInitArgs_fnptr JNI_GetDefaultJavaVMInitArgs_fn;
+static JNI_CreateJavaVM_fnptr JNI_CreateJavaVM_fn;
+static JNI_GetCreatedJavaVMs_fnptr JNI_GetCreatedJavaVMs_fn;
+
+static HMODULE jni_hmodule = NULL;
+static char last_error_buf[1024];
+
+static int load_sym(const char *sym, void **ptr) {
+    void *v = (void*)GetProcAddress(jni_hmodule, sym);
+    if (!v) {
+        DWORD err = GetLastError();
+        FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 
+                       NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), 
+                       last_error_buf, sizeof(last_error_buf), NULL);
+        FreeLibrary(jni_hmodule);
+        jni_hmodule = NULL;
+        return -1;
+    }
+    *ptr = v;
+    return 0;    
+}
+
+int djni_load(const char *path) {
+    last_error_buf[0] = 0;
+    if (jni_hmodule) return -1;
+    
+    // Use LoadLibraryEx with LOAD_WITH_ALTERED_SEARCH_PATH to handle dependencies
+    // located in the same directory as jvm.dll (e.g. msvcr*.dll)
+    jni_hmodule = LoadLibraryExA(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    
+    if (!jni_hmodule) {
+        DWORD err = GetLastError();
+        FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 
+                       NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), 
+                       last_error_buf, sizeof(last_error_buf), NULL);
+        return -2;
+    }
+    
+    if (load_sym("JNI_GetDefaultJavaVMInitArgs", (void**) &JNI_GetDefaultJavaVMInitArgs_fn) ||
+        load_sym("JNI_CreateJavaVM", (void**) &JNI_CreateJavaVM_fn) ||
+        load_sym("JNI_GetCreatedJavaVMs", (void**) &JNI_GetCreatedJavaVMs_fn)) {
+        JNI_GetDefaultJavaVMInitArgs_fn = 0;
+        JNI_CreateJavaVM_fn = 0;
+        JNI_GetCreatedJavaVMs_fn = 0;
+        FreeLibrary(jni_hmodule);
+        jni_hmodule = NULL;
+        return -3;
+    }
+    return 0;
+}
+
+int djni_unload(void) {
+    if (jni_hmodule) {
+        if (!FreeLibrary(jni_hmodule))
+            return -2;
+        jni_hmodule = NULL;
+        return 0;
+    }
+    return -1;  
+}
+
+int djni_loaded(void) {
+    return jni_hmodule ? 1 : 0;
+}
+
+const char* djni_last_error(void) {
+    return last_error_buf;
+}
+
+// Pass-through functions
+jint JNI_GetDefaultJavaVMInitArgs(void *args) {
+    return JNI_GetDefaultJavaVMInitArgs_fn ? JNI_GetDefaultJavaVMInitArgs_fn(args) : -99;
+}
+
+jint JNI_CreateJavaVM(JavaVM **pvm, void **penv, void *args) {
+    return JNI_CreateJavaVM_fn ? JNI_CreateJavaVM_fn(pvm, penv, args) : -99;
+}
+
+jint JNI_GetCreatedJavaVMs(JavaVM **vmBuf, jsize bufLen, jsize *nVMs) {
+    return JNI_GetCreatedJavaVMs_fn ? JNI_GetCreatedJavaVMs_fn(vmBuf, bufLen, nVMs) : -99;
+}
+
+#else
+/* ... Existing POSIX code goes here (keep existing src/djni.c content in #else block) ... */
 #include <dlfcn.h>
 
 #include "djni.h"
@@ -205,4 +294,5 @@ int main(int ac, char **av) {
     return 0;
 }
 
+#endif
 #endif
