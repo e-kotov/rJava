@@ -72,11 +72,11 @@ restores `PATH` right after linking `jvm.dll`.
 The Windows job therefore hides System32's VC++ runtime DLLs, as on a
 machine without the VC++ redistributable (for example with a JDK unpacked
 from a zip archive and not on `PATH`). JVM startup must still succeed, and
-does for Temurin 8, Temurin 17 and Corretto 11: the scoped `bin` search
-covers `jvm.dll` and its startup libraries. The later loads then fail, as
-recorded in the log: `sunmscapi.dll` on Temurin 8 and `awt.dll` on Temurin
-17 and Corretto 11, with "Can't find dependent libraries". This branch does
-not change that.
+does for all six JDKs: the scoped `bin` search covers `jvm.dll` and its
+startup libraries. The later loads then fail, as recorded in the log, with
+"Can't find dependent libraries": `sunmscapi.dll` on Temurin 8, and
+`awt.dll` on Temurin 11, 17 and 21, Corretto 11 and Zulu 25. This branch
+does not change that.
 
 Options for maintainers, **not implemented**: (1) append the JDK `bin`
 directory to `PATH` after selection, as an installer that adds Java to
