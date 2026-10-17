@@ -115,6 +115,7 @@ jobs:
           for scenario in select retry badinput unload preloaded nonascii fallback laterload jengine; do
             run "$scenario"
           done
+          run preloaded global
           run alias link
           run alias spelling
           if [[ "$RUNNER_OS" == Windows ]]; then run alias short; fi

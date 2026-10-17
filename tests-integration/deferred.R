@@ -48,11 +48,11 @@ fails <- function(expr, pattern = NULL) {
   log("rejected:", substr(gsub("\\s+", " ", result), 1L, 240L))
 }
 # Map a JVM library as other native code in the process would, outside rJava.
-preload <- function(path) {
+preload <- function(path, local = TRUE) {
   old <- Sys.getenv("PATH")
   # JDK 8 jvm.dll needs the C runtime from its bin directory.
   if (windows) Sys.setenv(PATH = paste(normalizePath(dirname(dirname(path)), winslash = "\\"), old, sep = ";"))
-  dyn.load(path, local = TRUE, now = TRUE)
+  dyn.load(path, local = local, now = TRUE)
   Sys.setenv(PATH = old)
 }
 # A directory name with spaces and non-ASCII characters when the locale allows it.
@@ -167,8 +167,10 @@ switch(scenario,
   },
   preloaded = {
     # A JVM library mapped outside this loader rejects a different runtime and
-    # permits the same one, without starting a VM.
-    preload(lib(home_a))
+    # permits the same one, without starting a VM. With global symbols, its
+    # JNI exports must not interpose on rJava's own loader wrappers.
+    stopifnot(variant %in% c("", "global"))
+    preload(lib(home_a), local = variant != "global")
     mapped <- .Call(internal("RgetMappedJVM"))
     stopifnot(!is.null(mapped), identical(mapped$vms, 0L))
     Sys.setenv(JAVA_HOME = home_b)
