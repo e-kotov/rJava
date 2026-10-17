@@ -68,6 +68,24 @@ jobs:
           fi
           cat "$RUNNER_TEMP/linkage.txt"
           if grep -Ei '(libjvm|DLL Name: jvm.dll)' "$RUNNER_TEMP/linkage.txt"; then exit 1; fi
+      - uses: actions/checkout@v4
+        with:
+          repository: e-kotov/rJavaEnv
+          ref: feature/downstream-java-integration
+          path: downstream-source
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          working-directory: downstream-source
+          dependencies: '"hard"'
+          extra-packages: any::callr
+          install-quarto: false
+      - name: Test installed rJavaEnv and downstream packages with dynamic rJava
+        working-directory: downstream-source
+        shell: Rscript {0}
+        env:
+          RJE_JAVA_HOME_A: ${{ steps.java17.outputs.path }}
+          RJE_JAVA_HOME_B: ${{ steps.java21.outputs.path }}
+        run: source("tools/test-downstream.R")
       - uses: actions/upload-artifact@v4
         if: always()
         with:
