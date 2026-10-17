@@ -47,7 +47,8 @@
     runing JVM, \code{FALSE} otherwise.}
   \item{state}{string representing the current state of the JVM. One of
     the following values:
-    \code{"none"} if there is no JVM, \code{"created"} if the current
+    \code{"not-loaded"} if no JVM run-time library has been selected yet,
+    \code{"none"} if a run-time library is loaded, but there is no JVM, \code{"created"} if the current
     JVM has been created by rJava, \code{"attached"} if rJava attached
     into an existing JVM (typically when R is embedded into a running
     JVM via JRI), \code{"detached"} if there is a JVM (such as embedded
@@ -92,6 +93,22 @@
   rare and problematic in either case. Behavior of rJava functions other
   than \code{.jinit} and \code{.jvmState} is undefined unless
   \code{.jvmState()$initialized} is \code{TRUE}.
+
+  Loading the rJava namespace does not select or load a JVM run-time.
+  The first call to \code{.jinit} selects one, in this order:
+  a JVM already created in the process (e.g. when R is embedded in Java
+  via JRI), to which rJava attaches regardless of other settings;
+  otherwise the \code{java.home} option (Windows only) or the
+  \code{JAVA_HOME} environment variable; then, on Windows, the
+  \code{CurrentVersion} of the JavaSoft registry keys; on macOS,
+  \code{/usr/libexec/java_home}; and finally the \code{java} executable
+  found on \code{PATH}. A Java home setting that is not an existing
+  directory is ignored with a warning. If no run-time can be found or
+  loaded, \code{.jinit} fails and can be called again after correcting
+  the setting. Once a run-time library is loaded, it remains selected
+  for the life of the R process: a different JVM requires a new R
+  process. If another JVM library is already mapped into the process,
+  but no JVM was created in it, only that same library can be selected.
 
   NOTE: \code{.jinit()} can be called implicitly by other functions such
   as \code{\link{.jpackage}} or \code{\link{J}}.

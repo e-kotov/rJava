@@ -16,22 +16,17 @@
   .Call(RunloadJVM)
 
 .jfindAndLoadJVM <- function() {
-    home <- if (.Platform$OS.type == "windows") .find.java.runtime() else Sys.getenv("JAVA_HOME")
-    if (!length(home) || !nzchar(home)) {
-        if (file.exists("/usr/libexec/java_home"))
-            home <- tryCatch(system("/usr/libexec/java_home", intern=TRUE, ignore.stderr=TRUE), error=function(...) "")
-        if (!length(home) || !nzchar(home))
-            home <- tryCatch(system2("java", c("-cp", shQuote(system.file("java", package="rJava")), "getsp", "java.home"),
-                                     stdout=TRUE, stderr=FALSE), error=function(...) "")
-    }
-    if (length(home) != 1L || is.na(home) || !nzchar(home) || !dir.exists(home))
+    ## A Java application embedding R (e.g. JRI) has already created a JVM. It
+    ## is the only runtime this process can use, so attach to it whatever Java
+    ## home is configured, as rJava linked against the JVM library did.
+    mapped <- .Call(RgetMappedJVM)
+    if (!is.null(mapped) && isTRUE(mapped$vms > 0L))
+        return(.jloadJVM(mapped$path))
+    home <- .find.java.runtime()
+    if (!nzchar(home))
         stop("Cannot find Java. Set JAVA_HOME to an existing Java home before initializing the JVM.")
-    pattern <- if (.Platform$OS.type == "windows") "^jvm[.]dll$" else "^libjvm[.](so|dylib)$"
-    libjvm <- list.files(home, pattern, recursive=TRUE, full.names=TRUE)
+    libjvm <- .find.jvm.library(home)
     if (!length(libjvm)) stop("Cannot find JVM library in ", home)
-    ## Prefer the server VM when an older JDK also contains a client VM.
-    server <- grepl("/server/", libjvm, fixed=TRUE)
-    libjvm <- c(libjvm[server], libjvm[!server])
     .jloadJVM(normalizePath(libjvm[1], winslash="/", mustWork=TRUE))
 }
 
