@@ -731,7 +731,7 @@ int test_jvm(const char *path) {
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 
-static void add_image(const struct mach_header* mh, intptr_t vmaddr_slide) {
+static void debug_add_image(const struct mach_header* mh, intptr_t vmaddr_slide) {
     Dl_info DlInfo;
     dladdr(mh, &DlInfo);
     printf("LOADED: %s\n", DlInfo.dli_fname);
@@ -746,7 +746,7 @@ static void rm_image(const struct mach_header* mh, intptr_t vmaddr_slide) {
 
 int main(int ac, char **av) {
 #ifdef __APPLE__
-    _dyld_register_func_for_add_image(add_image);
+    _dyld_register_func_for_add_image(debug_add_image);
     _dyld_register_func_for_remove_image(rm_image);
 #endif
 
