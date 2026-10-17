@@ -51,7 +51,7 @@ jobs:
           RJE_JAVA_HOME_B: ${{ steps.java21.outputs.path }}
         run: |
           set -euo pipefail
-          for scenario in select retry unload; do
+          for scenario in select retry unload preloaded; do
             Rscript --vanilla tests-integration/deferred.R "$scenario"
           done
       - name: Inspect native JVM linkage
@@ -71,7 +71,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: e-kotov/rJavaEnv
-          ref: feature/downstream-java-integration
+          ref: 9dd898e
           path: downstream-source
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:

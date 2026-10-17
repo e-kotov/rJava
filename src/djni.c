@@ -1,11 +1,21 @@
 /* Dynamic JNI loader: no JVM dependency is resolved at namespace load. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #ifdef _WIN32
 #define _WIN32_WINNT 0x0602
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#elif defined(__linux__)
+#include <link.h>
+#endif
 #endif
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include "djni.h"
 
 static JNI_GetDefaultJavaVMInitArgs_fnptr JNI_GetDefaultJavaVMInitArgs_fn;
@@ -41,17 +51,49 @@ static int load_sym(const char *sym, void **ptr) {
     if (!*ptr) { save_error(); return -1; }
     return 0;
 }
+#ifndef _WIN32
+static int different_jvm(const char *loaded, const char *requested) {
+    const char *base = strrchr(loaded, '/');
+    char *a, *b;
+    int different;
+    base = base ? base + 1 : loaded;
+    if (strcmp(base, "libjvm.dylib") && strcmp(base, "libjvm.so")) return 0;
+    a = realpath(loaded, NULL);
+    b = realpath(requested, NULL);
+    different = !a || !b || strcmp(a, b);
+    if (different)
+        snprintf(last_error, sizeof(last_error), "Another JVM library is already mapped: %s. Use a new R process.", loaded);
+    free(a); free(b);
+    return different;
+}
+#ifdef __linux__
+static int check_image(struct dl_phdr_info *info, size_t size, void *path) {
+    return different_jvm(info->dlpi_name, (const char *) path);
+}
+#endif
+#endif
+
 int djni_load(const char *path) {
     last_error[0] = 0;
     if (jni_dl) return -1;
 #ifdef _WIN32
-    wchar_t wide_path[32768], bin_path[32768], *slash;
+    wchar_t wide_path[32768], bin_path[32768], full_path[32768], mapped_path[32768], *slash;
+    HMODULE mapped;
     DLL_DIRECTORY_COOKIE cookie = 0;
     if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide_path, 32768)) {
         save_error(); return -2;
     }
+    if (!GetFullPathNameW(wide_path, 32768, full_path, NULL)) {
+        save_error(); return -2;
+    }
+    for (slash = full_path; *slash; slash++) if (*slash == L'/') *slash = L'\\';
+    mapped = GetModuleHandleW(L"jvm.dll");
+    if (mapped && (!GetModuleFileNameW(mapped, mapped_path, 32768) || lstrcmpiW(full_path, mapped_path))) {
+        snprintf(last_error, sizeof(last_error), "Another JVM library is already mapped. Use a new R process.");
+        return -4;
+    }
     /* JDK 8 needs its bin directory as well as bin/server for dependent DLLs. */
-    wcscpy(bin_path, wide_path);
+    wcscpy(bin_path, full_path);
     for (slash = bin_path; *slash; slash++) if (*slash == L'/') *slash = L'\\';
     slash = wcsrchr(bin_path, L'\\');
     if (slash) {
@@ -59,10 +101,17 @@ int djni_load(const char *path) {
         slash = wcsrchr(bin_path, L'\\');
         if (slash) { *slash = 0; cookie = AddDllDirectory(bin_path); }
     }
-    jni_dl = LoadLibraryExW(wide_path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    jni_dl = LoadLibraryExW(full_path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (!jni_dl) save_error();
     if (cookie) RemoveDllDirectory(cookie);
 #else
+#ifdef __APPLE__
+    uint32_t i;
+    for (i = 0; i < _dyld_image_count(); i++)
+        if (different_jvm(_dyld_get_image_name(i), path)) return -4;
+#elif defined(__linux__)
+    if (dl_iterate_phdr(check_image, (void *) path)) return -4;
+#endif
     jni_dl = dlopen(path, RTLD_LOCAL | RTLD_NOW);
     if (!jni_dl) save_error();
 #endif

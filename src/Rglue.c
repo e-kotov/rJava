@@ -1151,6 +1151,7 @@ REPC SEXP RloadJVM(SEXP sPath, SEXP sSilent) {
     case -1: Rf_error("JVM run-time is already loaded");
     case -2: Rf_error("Cannot load JVM run-time (%s)", djni_last_error() ? djni_last_error() : "unsuccessful");
     case -3: Rf_error("JVM run-time does not have required entry points");
+    case -4: Rf_error("%s", djni_last_error());
     }
     return Rf_ScalarLogical(1);
 }

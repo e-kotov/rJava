@@ -17,7 +17,14 @@ lib <- function(home) {
   stopifnot(length(paths) >= 1L)
   normalizePath(paths[1], winslash = "/")
 }
-if (scenario == "retry") {
+if (scenario == "preloaded") {
+  # Detect a JVM library loaded outside this loader, without starting a VM.
+  dyn.load(lib(home_a))
+  Sys.setenv(JAVA_HOME = home_b)
+  failed <- try(rJava::.jinit(), silent = TRUE)
+  stopifnot(inherits(failed, "try-error"), grepl("already mapped", failed))
+  stopifnot(!state()$initialized)
+} else if (scenario == "retry") {
   failed <- try(rJava::.jinit(), silent = TRUE)
   stopifnot(inherits(failed, "try-error"), state()$state == "not-loaded")
   # A native library with no JNI exports must fail cleanly and permit retry.
@@ -33,7 +40,7 @@ if (scenario == "retry") {
   failed <- try(get(".jloadJVM", ns)(lib(home_b)), silent = TRUE)
   stopifnot(inherits(failed, "try-error"), state()$state == "none")
 } else stopifnot(scenario == "select")
-selected <- if (scenario == "unload") home_a else home_b
+selected <- if (scenario %in% c("unload", "preloaded")) home_a else home_b
 Sys.setenv(JAVA_HOME = selected)
 rJava::.jinit()
 stopifnot(state()$initialized, state()$state == "created")
