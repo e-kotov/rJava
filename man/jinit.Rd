@@ -107,8 +107,10 @@
   loaded, \code{.jinit} fails and can be called again after correcting
   the setting. Once a run-time library is loaded, it remains selected
   for the life of the R process: a different JVM requires a new R
-  process. If another JVM library is already mapped into the process,
-  but no JVM was created in it, only that same library can be selected.
+  process. If a JVM library is already mapped into the process, a JVM
+  library path, such as one given to \code{.jloadJVM}, selects it only if
+  it names that same file, also when a JVM was created in it; attaching to
+  a created JVM is done by \code{.jinit} without a path.
 
   NOTE: \code{.jinit()} can be called implicitly by other functions such
   as \code{\link{.jpackage}} or \code{\link{J}}.

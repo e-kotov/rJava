@@ -18,10 +18,12 @@
 .jfindAndLoadJVM <- function() {
     ## A Java application embedding R (e.g. JRI) has already created a JVM. It
     ## is the only runtime this process can use, so attach to it whatever Java
-    ## home is configured, as rJava linked against the JVM library did.
+    ## home is configured, as rJava linked against the JVM library did. The
+    ## mapped image is selected itself, not through its name: .jloadJVM(path)
+    ## accepts only a path that names the mapped file.
     mapped <- .Call(RgetMappedJVM)
     if (!is.null(mapped) && isTRUE(mapped$vms > 0L))
-        return(.jloadJVM(mapped$path))
+        return(.Call(RattachJVM))
     home <- .find.java.runtime()
     if (!nzchar(home))
         stop("Cannot find Java. Set JAVA_HOME to an existing Java home before initializing the JVM.")

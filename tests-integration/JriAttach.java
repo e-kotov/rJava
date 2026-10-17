@@ -19,8 +19,12 @@ public class JriAttach {
             System.err.println("FAIL: cannot start embedded R");
             System.exit(2);
         }
+        /* An explicit path must name the mapped file: JAVA_HOME's runtime is rejected. */
         REXP result = engine.eval("tryCatch({" +
-            " library(rJava); .jinit();" +
+            " library(rJava);" +
+            " b <- try(.jloadJVM(rJava:::.find.jvm.library(Sys.getenv('JAVA_HOME'))[1]), silent = TRUE);" +
+            " if (!inherits(b, 'try-error') || .jvmState()$state != 'not-loaded') stop('JAVA_HOME runtime was selected');" +
+            " .jinit();" +
             " paste('OK', .jvmState()$state, .jcall('java/lang/System', 'S', 'getProperty', 'java.home')," +
             "   !is.jnull(.jengine()), sep = '|')" +
             "}, error = function(e) paste('ERROR', conditionMessage(e), sep = '|'))");

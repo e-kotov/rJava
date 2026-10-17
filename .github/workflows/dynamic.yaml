@@ -136,6 +136,7 @@ jobs:
           for scenario in select retry badinput unload preloaded nonascii fallback laterload hosted; do
             run "$scenario"
           done
+          run hosted explicit
           # Windows source installs build no JRI (pre-existing upstream build defects).
           if [[ "$RUNNER_OS" != Windows ]]; then run jengine; fi
           run preloaded global
@@ -152,7 +153,7 @@ jobs:
           # The file of a mapped JVM library is deleted, or replaced by B's.
           run replaced deleted
           run replaced replaced
-          if [[ "$RUNNER_OS" != Windows ]]; then run hosted replaced; fi
+          run hosted replaced
       - name: Remove hard links left in the JDK directories
         if: always() && env.RJE_JAVA_HOME_A != ''
         shell: bash

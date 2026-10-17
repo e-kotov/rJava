@@ -1137,6 +1137,15 @@ REPC SEXP RgetJVMstate(void) {
     return res;
 }
 
+static void load_error(int res) {
+    switch(res) {
+    case -1: Rf_error("JVM run-time is already loaded");
+    case -2: Rf_error("Cannot load JVM run-time (%s)", djni_last_error() ? djni_last_error() : "unsuccessful");
+    case -3: Rf_error("JVM run-time does not have required entry points");
+    case -4: Rf_error("%s", djni_last_error());
+    }
+}
+
 REPC SEXP RloadJVM(SEXP sPath, SEXP sSilent) {
     const char *path;
     int res, silent = Rf_asInteger(sSilent);
@@ -1152,12 +1161,15 @@ REPC SEXP RloadJVM(SEXP sPath, SEXP sSilent) {
     res = djni_load(path);
     if (silent)
 	return Rf_ScalarInteger(res);
-    switch(res) {
-    case -1: Rf_error("JVM run-time is already loaded");
-    case -2: Rf_error("Cannot load JVM run-time (%s)", djni_last_error() ? djni_last_error() : "unsuccessful");
-    case -3: Rf_error("JVM run-time does not have required entry points");
-    case -4: Rf_error("%s", djni_last_error());
-    }
+    load_error(res);
+    return Rf_ScalarLogical(1);
+}
+
+/* Selects the JVM library that created the VM already running in the
+   process, e.g. in a Java application embedding R. Unlike RloadJVM, no path
+   names it: the file at its recorded name may have been replaced since. */
+REPC SEXP RattachJVM(void) {
+    load_error(djni_attach());
     return Rf_ScalarLogical(1);
 }
 

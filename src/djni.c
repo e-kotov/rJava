@@ -299,14 +299,12 @@ static int load_library(const char *path) {
     }
     if (n) {
         /* Two mapped JVM modules are two runtimes, even if they are one file.
-           A created VM is the only one the process can run: the name recorded
-           for its module, as djni_mapped() reports it, selects that module. */
+           A path selects the mapped module only if it names the mapped file,
+           also once a VM was created: djni_attach() attaches without a path. */
         wchar_t *mapped = NULL;
         char *name = jvms[0].path ? to_utf8(jvms[0].path) : NULL;
         int same = -1;
-        if (n == 1 && name && created_vms(jvms[0].handle) > 0 && !strcmp(path, name))
-            same = 1;
-        else if (n == 1 && jvms[0].path && (mapped = mapped_path(jvms[0].handle)))
+        if (n == 1 && jvms[0].path && (mapped = mapped_path(jvms[0].handle)))
             same = same_file(full, mapped);
         free(mapped);
         if (same == 1 && !is_jvm_name(jvms[0].path)) {
@@ -357,6 +355,35 @@ static int load_library(const char *path) {
 done:
     if (jvms) free_jvms(jvms, n);
     free(wide); free(full); free(bin);
+    return res;
+}
+/* Takes a reference to the only mapped JVM module if it has created a VM.
+   The module's name is not checked: no VM is started, so the JDK's DLLs,
+   which import jvm.dll by name, are not loaded again. */
+static int attach_library(void) {
+    struct jvm_image *jvms;
+    char *name;
+    int n = find_jvms(&jvms), res = -4;
+    if (n < 0) {
+        save_win_error("Cannot list the modules of", "this process", GetLastError());
+        return -4;
+    }
+    name = (n && jvms[0].path) ? to_utf8(jvms[0].path) : NULL;
+    if (!n)
+        snprintf(last_error, sizeof(last_error), "No JVM library is mapped into this process.");
+    else if (n > 1)
+        snprintf(last_error, sizeof(last_error), "%d JVM libraries are already mapped, including %s. Use a new R process.",
+                 n, name ? name : "unknown path");
+    else if (created_vms(jvms[0].handle) <= 0)
+        snprintf(last_error, sizeof(last_error), "The JVM library mapped into this process has created no VM: %s.",
+                 name ? name : "unknown path");
+    else {
+        jni_dl = jvms[0].handle;
+        jvms[0].handle = NULL;
+        res = 0;
+    }
+    free(name);
+    free_jvms(jvms, n);
     return res;
 }
 const char *djni_mapped(int *vms) {
@@ -609,11 +636,9 @@ static int load_library(const char *path) {
         snprintf(last_error, sizeof(last_error), "%d JVM libraries are already mapped, including %s. Use a new R process.",
                  n, jvms[0].name);
     } else if (n == 1) {
-        /* A created VM is the only one the process can run: the name the
-           loader recorded for its image, as djni_mapped() reports it, selects
-           that image, whatever file is at that path now. */
-        int same = (created_vms(&jvms[0]) > 0 && !strcmp(path, jvms[0].name)) ? 1 :
-            same_as_mapped(jvms[0].addr, path);
+        /* A path selects the mapped image only if it names the mapped file,
+           also once a VM was created: djni_attach() attaches without a path. */
+        int same = same_as_mapped(jvms[0].addr, path);
         if (!same)
             snprintf(last_error, sizeof(last_error), "Another JVM library is already mapped: %s. Use a new R process.", jvms[0].name);
         else if (same == -2)
@@ -635,6 +660,32 @@ static int load_library(const char *path) {
         res = -2;
     } else
         res = 0;
+    free_jvms(jvms, n);
+    return res;
+}
+/* Takes the reference held to the only mapped JVM image if it has created
+   a VM. Its recorded name is not interpreted: the file there may have been
+   deleted or replaced, and on overlayfs the mapped file may be unverifiable,
+   but the created VM is the image's own. */
+static int attach_library(void) {
+    struct jvm_image *jvms;
+    int n = find_jvms(&jvms), res = -4;
+    if (n < 0) {
+        snprintf(last_error, sizeof(last_error), "Cannot list the libraries mapped into this process. Use a new R process.");
+        return -4;
+    }
+    if (!n)
+        snprintf(last_error, sizeof(last_error), "No JVM library is mapped into this process.");
+    else if (n > 1)
+        snprintf(last_error, sizeof(last_error), "%d JVM libraries are already mapped, including %s. Use a new R process.",
+                 n, jvms[0].name);
+    else if (created_vms(&jvms[0]) <= 0)
+        snprintf(last_error, sizeof(last_error), "The JVM library mapped into this process has created no VM: %s.", jvms[0].name);
+    else {
+        jni_dl = jvms[0].handle;
+        jvms[0].handle = NULL;
+        res = 0;
+    }
     free_jvms(jvms, n);
     return res;
 }
@@ -676,13 +727,8 @@ static int load_sym(const char *sym, void **ptr) {
     return 0;
 }
 
-/* returns: 0 = success, -1 = already loaded, -2 = load error, -3 = symbols
-   not found, -4 = another JVM library is already mapped */
-int djni_load(const char *path) {
-    int res;
-    last_error[0] = 0;
-    if (jni_dl) return -1;
-    if ((res = load_library(path))) return res;
+/* Resolves the JNI entry points of jni_dl, releasing it if one is missing. */
+static int load_syms(void) {
     if (load_sym("JNI_GetDefaultJavaVMInitArgs", (void **) &JNI_GetDefaultJavaVMInitArgs_fn) ||
         load_sym("JNI_CreateJavaVM", (void **) &JNI_CreateJavaVM_fn) ||
         load_sym("JNI_GetCreatedJavaVMs", (void **) &JNI_GetCreatedJavaVMs_fn)) {
@@ -690,6 +736,25 @@ int djni_load(const char *path) {
         return -3;
     }
     return 0;
+}
+
+/* returns: 0 = success, -1 = already loaded, -2 = load error, -3 = symbols
+   not found, -4 = another JVM library is already mapped */
+int djni_load(const char *path) {
+    int res;
+    last_error[0] = 0;
+    if (jni_dl) return -1;
+    if ((res = load_library(path))) return res;
+    return load_syms();
+}
+/* returns: 0 = success, -1 = already loaded, -3 = symbols not found, -4 = no
+   single mapped JVM library with a created VM */
+int djni_attach(void) {
+    int res;
+    last_error[0] = 0;
+    if (jni_dl) return -1;
+    if ((res = attach_library())) return res;
+    return load_syms();
 }
 int djni_unload(void) {
     if (!jni_dl) return -1;

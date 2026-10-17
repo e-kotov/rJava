@@ -12,7 +12,12 @@
 /* returned if no run-time is loaded */
 #define JNI_NO_DJNI -99
 
+/* Selects the JVM library at path. If one is already mapped, path must name
+   the mapped file, whether or not it has created a VM. */
 int djni_load(const char *path);
+/* Selects the only JVM library mapped into the process if it has created a
+   VM, by its mapped image: no path is interpreted and nothing is loaded. */
+int djni_attach(void);
 int djni_unload(void);
 const char* djni_last_error(void);
 int djni_loaded(void);

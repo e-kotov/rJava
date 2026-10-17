@@ -29,8 +29,9 @@ then a recursive search. An existing Java home without a JVM library is an
 error. Every failure before a library is loaded leaves the state
 `"not-loaded"`, so the setting can be corrected and `.jinit()` retried.
 
-If another JVM library is mapped into the process without a created VM,
-only the same file can be selected. djni finds mapped JVM libraries among
+If a JVM library is already mapped into the process, a path given to
+`.jloadJVM()`, or found from a Java home, selects it only if it names the
+mapped file, whether or not that library has created a VM. djni finds mapped JVM libraries among
 all images the dynamic loader lists (`dl_iterate_phdr` on Linux, dyld on
 macOS, `EnumProcessModules` on Windows), without loading anything. An image
 is a JVM library if it has a JVM library name (`libjvm.so`, `libjvm.dylib`,
@@ -64,9 +65,23 @@ unverifiable file is rejected, and so is any selection while more than one
 JVM image is mapped (`RgetMappedJVM` then reports one of them with `vms`
 `-1`). If the loaded images cannot be listed, selection fails and
 `RgetMappedJVM` signals an error, so callers do not mistake it for "none".
-Once the mapped library has created a VM, the only runtime the process can
-run, selecting the exact name `RgetMappedJVM` reports attaches to it without
-comparing files, as `.jinit()` does; any other name is compared as above.
+
+### Explicit selection and attaching
+
+Selecting a path and attaching to a created VM are separate operations.
+`.jloadJVM(path)` always compares files as above; no name is exempt, not
+even the one `RgetMappedJVM` reports for a created VM, since the file now
+at that name may be another runtime. `.jinit()` instead attaches through
+the internal `RattachJVM`, which takes no path: it requires exactly one
+mapped JVM image, with at least one created VM, and selects that image
+through the reference djni holds to it, without loading anything. So it
+attaches even if the file at the image's recorded name was deleted or
+replaced, or cannot be identified (overlayfs, below). It never selects an
+image without a created VM, never resolves an ambiguity between several
+images, and fails if the image lacks a JNI entry point. On Windows it does
+not apply the `jvm.dll` name rule, which concerns starting a VM (untested:
+the JDK cannot start a VM from a renamed `jvm.dll`). No
+exported function attaches without a path.
 
 ## Selected libraries are not unloaded
 
@@ -132,19 +147,19 @@ distribution with `sh mkdist`, installs it in an isolated library, and runs:
 | `jni-abi.R` | `src/jni.h` type sizes, invocation struct fields and every function table offset match each JDK's `jni.h` |
 | `select`, `retry`, `badinput` | selection after namespace load; recovery after an empty home, missing file, library without JNI exports, empty, over-long and relative paths |
 | `unload` | unloading or changing a selected, unstarted library fails |
-| `preloaded`, `preloaded global` | a library mapped outside rJava (also with global symbols) rejects another runtime and permits the same one |
+| `preloaded`, `preloaded global` | a library mapped outside rJava (also with global symbols) rejects another runtime and permits the same one; `RattachJVM` fails with nothing mapped and with no created VM |
 | `alias link/spelling/short` | the same preloaded library through a symbolic link or junction with spaces and non-ASCII characters, an alternative spelling, and an 8.3 name (Windows) |
 | `renamed copy/hardlink/symlink` | a JVM library mapped under a name no JVM uses: a copy of B rejects A and B's own library; a hard link of A in its directory (and a symbolic link, Linux and macOS) rejects B, then the same file starts A (Windows: is rejected as mapped under another name) |
 | `hosted renamed` | native code creates the VM from the hard link; it is reported with one VM, B is rejected, and `.jinit()` attaches (Linux and macOS) |
 | `replaced deleted/replaced` | the file of the mapped library is deleted, or replaced by a hard link of B's (Windows: a mapped DLL cannot be deleted, so it is renamed in a copy of A's home and B's linked as `jvm.dll`): B, the replaced name and `.jinit()` with `JAVA_HOME` naming B are rejected, A's own file is accepted, and after replacement A starts |
-| `hosted replaced` | the same replacement after a host created the VM: B is rejected, `.jinit()` attaches to A (Linux and macOS) |
+| `hosted replaced` | the same replacement after a host created the VM (Windows: renamed in a copy of A's home, as above): `.jloadJVM()` rejects B, the replaced name and the name `RgetMappedJVM` reports, all before `.jinit()` attaches to A |
 | `decoy` | the JDK's `jli` library (JNI exports on macOS, no `JVM_` exports) is not reported and does not block selecting B |
 | `nonascii` | loading through such a path without a preload |
 | `fallback` | invalid `JAVA_HOME` warns and falls back to an independently computed home (HKCU registry entry on Windows, `java_home` on macOS, `java` on PATH on Linux) |
 | `laterload` | the later native loads above |
-| `hosted` | native code creates a JVM, then `.jinit()` attaches to it although `JAVA_HOME` names the other JDK |
+| `hosted`, `hosted explicit` | native code creates a JVM, then `.jinit()` attaches to it although `JAVA_HOME` names the other JDK; `.jloadJVM()` rejects B, and with `explicit` selects A's own file first |
 | every scenario | before anything is mapped, `RgetMappedJVM` is `NULL`: rJava's own JNI wrappers are not taken for a JVM |
-| `jengine`, `jri.R` | JRI started from R; a Java host embedding R, where rJava attaches to the host JVM (Linux and macOS) |
+| `jengine`, `jri.R` | JRI started from R; a Java host embedding R, where `.jloadJVM()` rejects the `JAVA_HOME` runtime and rJava attaches to the host JVM (Linux and macOS) |
 | `dll-search.c` | Windows DLL search state after failed and successful loads |
 | downstream | rJavaEnv and two minimal consumer packages (current pair only) |
 
@@ -187,9 +202,10 @@ from the repository root, one process per scenario.
   usual name). If the mapped file cannot be identified (no `/proc` on
   Linux, a failed query), selection is rejected. On overlayfs (e.g. Docker)
   with Linux before 6.8, `/proc/self/maps` reports the layer file's device,
-  while `stat()` reports the overlay's, so a preloaded library without a
-  created VM is rejected as unverifiable even when it is the same file;
-  attaching to a created VM through its reported name is unaffected. This
+  while `stat()` reports the overlay's, so `.jloadJVM(path)` rejects a
+  mapped library as unverifiable even when it is the same file, with or
+  without a created VM; `.jinit()` attaching to a created VM is unaffected,
+  as it compares no files. This
   follows from the kernel source (`show_map_vma` uses `file_user_inode`
   only from 6.8) and is not tested. dyld
   records a library loaded through a symbolic link by its target, so on

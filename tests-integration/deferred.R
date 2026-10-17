@@ -192,9 +192,13 @@ switch(scenario,
     # permits the same one, without starting a VM. With global symbols, its
     # JNI exports must not interpose on rJava's own loader wrappers.
     stopifnot(variant %in% c("", "global"))
+    # The internal attach used by .jinit() selects only a created VM.
+    attach <- function() .Call(internal("RattachJVM"))
+    fails(attach(), "No JVM library is mapped")
     preload(lib(home_a), local = variant != "global")
     mapped <- .Call(internal("RgetMappedJVM"))
     stopifnot(!is.null(mapped), identical(mapped$vms, 0L))
+    fails(attach(), "created no VM")
     Sys.setenv(JAVA_HOME = home_b)
     fails(rJava::.jinit(), "already mapped")
     fails(internal(".jloadJVM")(lib(home_b)), "already mapped")
@@ -375,30 +379,53 @@ switch(scenario,
     # Native code in this process created a JVM before rJava was used. rJava
     # must attach to it, although JAVA_HOME names another runtime. A host
     # provides rJava's class loader on its class path (JDK 9+ forbids adding it).
+    # Variant explicit: .jloadJVM() selects A's own file before .jinit().
+    # Variant renamed: the host loads the runtime under a name no JVM uses.
+    # Not on Windows, where the JDK's DLLs then cannot import jvm.dll by name.
+    # Variant replaced: B's library then replaces that name (on Windows, the
+    # jvm.dll of a copy of A's home, renamed as in replaced). .jinit() attaches
+    # to the created VM, but .jloadJVM() rejects that name and B: a path
+    # selects only the file mapped, also when a VM was created.
+    stopifnot(variant %in% c("", "explicit", "renamed", "replaced"), !(windows && variant == "renamed"))
     helper <- Sys.getenv("RJE_JVMHOST")
     stopifnot(file.exists(helper))
     dyn.load(helper)
     boot <- file.path(system.file("java", package = "rJava"), "boot")
+    home <- home_a
+    if (windows && variant == "replaced") {
+      copy <- file.path("C:/rjava-paths", paste0("hosted-", Sys.getpid()))
+      dir.create(copy, recursive = TRUE)
+      stopifnot(file.copy(normalizePath(home_a), copy, recursive = TRUE))
+      home <- file.path(copy, basename(normalizePath(home_a)))
+      path <- file.path(home, relative(home_a))
+    } else path <- if (variant %in% c("renamed", "replaced")) alias_lib(home_a) else lib(home_a)
     old <- Sys.getenv("PATH")
-    if (windows) Sys.setenv(PATH = paste(normalizePath(dirname(dirname(lib(home_a))), winslash = "\\"), old, sep = ";"))
-    # Variant renamed: the host loads the runtime under a name no JVM uses.
-    # Not on Windows, where the JDK's DLLs then cannot import jvm.dll by name.
-    # Variant replaced: B's library then replaces that name; rJava attaches
-    # to the created VM through its recorded name, but B is rejected.
-    stopifnot(variant %in% c("", "renamed", "replaced"), !(windows && variant != ""))
-    path <- if (variant != "") alias_lib(home_a) else lib(home_a)
+    if (windows) Sys.setenv(PATH = paste(normalizePath(dirname(dirname(path)), winslash = "\\"), old, sep = ";"))
     created <- .C("rjava_test_create_jvm", path, paste0("-Djava.class.path=", boot), result = 0L)$result
     Sys.setenv(PATH = old)
     stopifnot(created == 0L)
     expect_mapped(path, 1L)
+    # The name djni_mapped() reports, which .jinit() once passed to .jloadJVM().
+    recorded <- mapped_jvm()$path
     if (variant == "replaced") {
-      stopifnot(unlink(path) == 0L, file.link(lib(home_b), path))
+      if (windows) {
+        moved <- file.path(dirname(path), "jvm-mapped.dll")
+        stopifnot(file.rename(path, moved), file.link(lib(home_b), path))
+      } else stopifnot(unlink(path) == 0L, file.link(lib(home_b), path))
       log("replaced", path, "by a hard link of", lib(home_b))
+      expect_mapped(if (!windows) path, 1L)
     }
     stopifnot(state()$state == "not-loaded")
     Sys.setenv(JAVA_HOME = home_b)
-    fails(internal(".jloadJVM")(lib(home_b)), "already mapped")
-    start(home_a)
+    fails(rJava::.jloadJVM(lib(home_b)), "already mapped")
+    if (variant == "replaced") {
+      fails(rJava::.jloadJVM(recorded), "already mapped")
+      fails(rJava::.jloadJVM(path), "already mapped")
+    }
+    if (variant == "explicit") {
+      stopifnot(isTRUE(rJava::.jloadJVM(lib(home_a))), state()$state == "detached")
+    }
+    start(home)
     stopifnot(state()$state == "attached")
   },
   jengine = {
