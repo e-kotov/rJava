@@ -265,6 +265,69 @@ switch(scenario,
       }
     }
   },
+  replaced = {
+    # The file the mapped JVM library was loaded from is deleted, or replaced
+    # by B's library under the same name. Identity is that of the mapped file,
+    # not of the file now at its name: B must be rejected, A still accepted.
+    stopifnot(variant %in% c("deleted", "replaced"))
+    if (windows) {
+      # A mapped DLL cannot be deleted, but may be renamed. JDK DLLs import
+      # jvm.dll by name, so replace jvm.dll in a copy of A's home.
+      copy <- file.path("C:/rjava-paths", paste0("replaced-", Sys.getpid()))
+      dir.create(copy, recursive = TRUE)
+      stopifnot(file.copy(normalizePath(home_a), copy, recursive = TRUE))
+      home <- file.path(copy, basename(normalizePath(home_a)))
+      path <- file.path(home, relative(home_a))
+      preload(path)
+      expect_mapped(path, 0L)
+      stopifnot(unlink(path) != 0L || file.exists(path))
+      log("Windows refused deleting the mapped", path)
+      if (variant == "deleted") {
+        fails(internal(".jloadJVM")(lib(home_b)), "already mapped")
+        internal(".jloadJVM")(path)
+        stopifnot(state()$state == "none")
+        start(home)
+      } else {
+        moved <- file.path(dirname(path), "jvm-mapped.dll")
+        stopifnot(file.rename(path, moved), file.link(lib(home_b), path))
+        log("renamed the mapped DLL to", moved, "and linked B's in its place")
+        expect_mapped(NULL, 0L)
+        fails(internal(".jloadJVM")(lib(home_b)), "already mapped")
+        fails(internal(".jloadJVM")(path), "already mapped")
+        Sys.setenv(JAVA_HOME = home_b)
+        fails(rJava::.jinit(), "already mapped")
+        internal(".jloadJVM")(moved)
+        stopifnot(state()$state == "none")
+        start(home)
+        expect_mapped(NULL, 1L)
+      }
+    } else {
+      path <- alias_lib(home_a)
+      preload(path)
+      expect_mapped(path, 0L)
+      stopifnot(unlink(path) == 0L, !file.exists(path))
+      if (variant == "replaced") {
+        # A hard link, so the old check (the file now at the mapped name is B's
+        # library) accepted B and kept A's handle.
+        stopifnot(file.link(lib(home_b), path))
+        log("replaced", path, "by a hard link of", lib(home_b))
+      }
+      fails(internal(".jloadJVM")(lib(home_b)), "already mapped")
+      fails(internal(".jloadJVM")(path), "already mapped")
+      Sys.setenv(JAVA_HOME = home_b)
+      fails(rJava::.jinit(), "already mapped")
+      # A's library is the mapped file, whatever is now at the mapped name.
+      internal(".jloadJVM")(lib(home_a))
+      stopifnot(state()$state == "none")
+      expect_mapped(path, 0L)
+      # The JVM finds its home from its own file name, which no longer exists
+      # if deleted.
+      if (variant == "replaced") {
+        start(home_a)
+        expect_mapped(path, 1L)
+      }
+    }
+  },
   decoy = {
     # The Java launcher library (jli) has JNI exports on macOS that forward to
     # libjvm, but is no JVM: it must neither be reported nor block selection.
@@ -320,12 +383,18 @@ switch(scenario,
     if (windows) Sys.setenv(PATH = paste(normalizePath(dirname(dirname(lib(home_a))), winslash = "\\"), old, sep = ";"))
     # Variant renamed: the host loads the runtime under a name no JVM uses.
     # Not on Windows, where the JDK's DLLs then cannot import jvm.dll by name.
-    stopifnot(variant %in% c("", "renamed"), !(windows && variant == "renamed"))
-    path <- if (variant == "renamed") alias_lib(home_a) else lib(home_a)
+    # Variant replaced: B's library then replaces that name; rJava attaches
+    # to the created VM through its recorded name, but B is rejected.
+    stopifnot(variant %in% c("", "renamed", "replaced"), !(windows && variant != ""))
+    path <- if (variant != "") alias_lib(home_a) else lib(home_a)
     created <- .C("rjava_test_create_jvm", path, paste0("-Djava.class.path=", boot), result = 0L)$result
     Sys.setenv(PATH = old)
     stopifnot(created == 0L)
     expect_mapped(path, 1L)
+    if (variant == "replaced") {
+      stopifnot(unlink(path) == 0L, file.link(lib(home_b), path))
+      log("replaced", path, "by a hard link of", lib(home_b))
+    }
     stopifnot(state()$state == "not-loaded")
     Sys.setenv(JAVA_HOME = home_b)
     fails(internal(".jloadJVM")(lib(home_b)), "already mapped")

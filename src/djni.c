@@ -10,11 +10,15 @@
 #include <psapi.h>
 #else
 #include <dlfcn.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+#include <libproc.h>
 #elif defined(__linux__)
 #include <link.h>
+#include <sys/sysmacros.h>
+#include <sys/vfs.h>
 #endif
 #endif
 #include <stdint.h>
@@ -142,6 +146,21 @@ static int same_file(const wchar_t *a, const wchar_t *b) {
     if (hb != INVALID_HANDLE_VALUE) CloseHandle(hb);
     return res;
 }
+/* The file mapped for a module, as a path that opens it: the module's
+   recorded name may now be another file, if the mapped one was renamed and
+   replaced. GetMappedFileNameW gives an NT device path. */
+static wchar_t *mapped_path(HMODULE module) {
+    static const wchar_t root[] = L"\\\\?\\GLOBALROOT";
+    DWORD size = 32768, skip = (DWORD) wcslen(root), n;
+    wchar_t *buf = malloc(sizeof(wchar_t) * (skip + size));
+    if (!buf) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
+    wcscpy(buf, root);
+    n = K32GetMappedFileNameW(GetCurrentProcess(), (LPVOID) module, buf + skip, size);
+    if (n && n < size - 1) return buf;
+    if (n) SetLastError(ERROR_INSUFFICIENT_BUFFER);
+    free(buf);
+    return NULL;
+}
 static int in_image(DWORD rva, DWORD count, DWORD width, DWORD size) {
     return rva < size && count <= (size - rva) / width;
 }
@@ -250,6 +269,15 @@ static void free_jvms(struct jvm_image *v, int n) {
     }
     free(v);
 }
+/* The number of VMs created by a JVM module, or -1 if unknown. */
+static int created_vms(HMODULE module) {
+    JNI_GetCreatedJavaVMs_fnptr created;
+    JavaVM *vm;
+    jsize count = 0;
+    if (!owns_export(module, "JNI_GetCreatedJavaVMs")) return -1;
+    created = (JNI_GetCreatedJavaVMs_fnptr) GetProcAddress(module, "JNI_GetCreatedJavaVMs");
+    return created && created(&vm, 1, &count) == JNI_OK ? (int) count : -1;
+}
 static int load_library(const char *path) {
     wchar_t *wide = NULL, *full = NULL, *bin = NULL, *slash;
     struct jvm_image *jvms = NULL;
@@ -270,9 +298,17 @@ static int load_library(const char *path) {
         goto done;
     }
     if (n) {
-        /* Two mapped JVM modules are two runtimes, even if they are one file. */
-        int same = (n == 1 && jvms[0].path) ? same_file(full, jvms[0].path) : -1;
+        /* Two mapped JVM modules are two runtimes, even if they are one file.
+           A created VM is the only one the process can run: the name recorded
+           for its module, as djni_mapped() reports it, selects that module. */
+        wchar_t *mapped = NULL;
         char *name = jvms[0].path ? to_utf8(jvms[0].path) : NULL;
+        int same = -1;
+        if (n == 1 && name && created_vms(jvms[0].handle) > 0 && !strcmp(path, name))
+            same = 1;
+        else if (n == 1 && jvms[0].path && (mapped = mapped_path(jvms[0].handle)))
+            same = same_file(full, mapped);
+        free(mapped);
         if (same == 1 && !is_jvm_name(jvms[0].path)) {
             /* The JDK's DLLs import jvm.dll by name, and the loader matches
                loaded modules by base name: starting this one would load
@@ -339,13 +375,7 @@ const char *djni_mapped(int *vms) {
         return NULL;
     }
     /* With several JVM modules, the VM count of one is not the answer. */
-    if (n == 1 && owns_export(jvms[0].handle, "JNI_GetCreatedJavaVMs")) {
-        JNI_GetCreatedJavaVMs_fnptr created =
-            (JNI_GetCreatedJavaVMs_fnptr) GetProcAddress(jvms[0].handle, "JNI_GetCreatedJavaVMs");
-        JavaVM *vm;
-        jsize count = 0;
-        if (created && created(&vm, 1, &count) == JNI_OK) *vms = (int) count;
-    }
+    if (n == 1) *vms = created_vms(jvms[0].handle);
     mapped_name = jvms[0].path ? to_utf8(jvms[0].path) : NULL;
     if (!mapped_name) mapped_name = strdup("(unknown path)");
     if (!mapped_name) {
@@ -356,10 +386,53 @@ const char *djni_mapped(int *vms) {
     return mapped_name;
 }
 #else
-static int same_file(const char *a, const char *b) {
-    struct stat sa, sb;
-    if (stat(a, &sa) || stat(b, &sb)) return -1;
-    return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+/* Whether path names the file mapped at addr, by device and inode, which
+   hold across symbolic links, hard links and equivalent spellings. The name
+   the loader recorded is not used: the file there may have been deleted or
+   replaced since, while the mapping keeps the old file. Returns 1 for the
+   same file, 0 for another or no file, -1 if the mapped file is unknown, and
+   -2 on overlayfs, where a mismatch proves nothing (below). */
+static int same_as_mapped(const void *addr, const char *path) {
+    struct stat s;
+    int res = -1;
+    if (stat(path, &s)) return 0;
+#ifdef __APPLE__
+    {
+        struct proc_regionwithpathinfo r;
+        uint64_t a = (uint64_t) (uintptr_t) addr;
+        /* The region returned starts after addr if nothing is mapped there. */
+        if (addr && proc_pidinfo(getpid(), PROC_PIDREGIONPATHINFO, a, &r, sizeof(r)) == (int) sizeof(r) &&
+            a >= r.prp_prinfo.pri_address && a - r.prp_prinfo.pri_address < r.prp_prinfo.pri_size &&
+            r.prp_vip.vip_vi.vi_stat.vst_ino)
+            res = r.prp_vip.vip_vi.vi_stat.vst_dev == (uint32_t) s.st_dev &&
+                r.prp_vip.vip_vi.vi_stat.vst_ino == (uint64_t) s.st_ino;
+    }
+#elif defined(__linux__)
+    {
+        FILE *f = addr ? fopen("/proc/self/maps", "r") : NULL;
+        char *line = NULL;
+        size_t size = 0;
+        unsigned long long a = (uintptr_t) addr, start, end, ino;
+        unsigned int maj, min;
+        struct statfs fs;
+        if (f) {
+            while (getline(&line, &size, f) > 0)
+                if (sscanf(line, "%llx-%llx %*s %*s %x:%x %llu", &start, &end, &maj, &min, &ino) == 5 &&
+                    a >= start && a < end) {
+                    if (ino)
+                        res = major(s.st_dev) == maj && minor(s.st_dev) == min &&
+                            (unsigned long long) s.st_ino == ino;
+                    break;
+                }
+            free(line);
+            fclose(f);
+        }
+        /* Before Linux 6.8, /proc/self/maps shows the device and inode of the
+           layer file under an overlayfs mapping, but stat() the overlay device. */
+        if (!res && !statfs(path, &fs) && fs.f_type == 0x794c7630) res = -2;
+    }
+#endif
+    return res;
 }
 static int is_jvm_name(const char *name) {
     const char *base = strrchr(name, '/');
@@ -462,7 +535,7 @@ static int owns(void *handle, const struct image *im, const char *sym) {
 #endif
 }
 #endif
-struct jvm_image { char *name; void *handle; int owns_created; };
+struct jvm_image { char *name; void *handle; int owns_created; const void *addr; };
 /* Lists the JVM images mapped into the process, each with a reference if
    one can be taken without loading anything. An image is a JVM if it has a
    JVM library name, even if malformed, or if it defines the JNI invocation
@@ -494,6 +567,11 @@ static int find_jvms(struct jvm_image **out) {
         if (jvm) {
             v[n].name = l.v[i].name;
             l.v[i].name = NULL;
+#ifdef __APPLE__
+            v[n].addr = l.v[i].header;
+#else
+            v[n].addr = l.v[i].nseg ? (const void *) l.v[i].seg[0] : NULL;
+#endif
             v[n++].handle = handle;
         } else if (handle)
             dlclose(handle);
@@ -511,11 +589,18 @@ static void free_jvms(struct jvm_image *v, int n) {
     }
     free(v);
 }
-/* Device and inode identify the file across symbolic links, hard links and
-   equivalent spellings; a requested file that cannot be found differs. */
+/* The number of VMs created by a JVM image, or -1 if unknown. */
+static int created_vms(const struct jvm_image *im) {
+    JNI_GetCreatedJavaVMs_fnptr created;
+    JavaVM *vm;
+    jsize count = 0;
+    if (!im->owns_created) return -1;
+    *(void **) &created = dlsym(im->handle, "JNI_GetCreatedJavaVMs");
+    return created && created(&vm, 1, &count) == JNI_OK ? (int) count : -1;
+}
 static int load_library(const char *path) {
     struct jvm_image *jvms;
-    int n = find_jvms(&jvms), res = 0;
+    int n = find_jvms(&jvms), res = -4;
     if (n < 0) {
         snprintf(last_error, sizeof(last_error), "Cannot list the libraries mapped into this process. Use a new R process.");
         return -4;
@@ -523,24 +608,33 @@ static int load_library(const char *path) {
     if (n > 1) {
         snprintf(last_error, sizeof(last_error), "%d JVM libraries are already mapped, including %s. Use a new R process.",
                  n, jvms[0].name);
-        res = -4;
     } else if (n == 1) {
-        if (same_file(jvms[0].name, path) != 1) {
+        /* A created VM is the only one the process can run: the name the
+           loader recorded for its image, as djni_mapped() reports it, selects
+           that image, whatever file is at that path now. */
+        int same = (created_vms(&jvms[0]) > 0 && !strcmp(path, jvms[0].name)) ? 1 :
+            same_as_mapped(jvms[0].addr, path);
+        if (!same)
             snprintf(last_error, sizeof(last_error), "Another JVM library is already mapped: %s. Use a new R process.", jvms[0].name);
-            res = -4;
-        } else if (!jvms[0].handle) {
+        else if (same == -2)
+            snprintf(last_error, sizeof(last_error), "Cannot verify that %s is the JVM library already mapped: %s, because overlayfs before Linux 6.8 reports another file for the mapping. Use a new R process.",
+                     path, jvms[0].name);
+        else if (same < 0)
+            snprintf(last_error, sizeof(last_error), "Cannot verify that %s is the JVM library already mapped: %s. Use a new R process.", path, jvms[0].name);
+        else if (!jvms[0].handle)
             snprintf(last_error, sizeof(last_error), "Cannot reference the JVM library already mapped: %s. Use a new R process.", jvms[0].name);
-            res = -4;
-        } else {
+        else {
             /* Reference the mapped image itself, so an alias cannot map another copy. */
             jni_dl = jvms[0].handle;
             jvms[0].handle = NULL;
+            res = 0;
         }
     } else if (!(jni_dl = dlopen(path, RTLD_LOCAL | RTLD_NOW))) {
         const char *error = dlerror();
         snprintf(last_error, sizeof(last_error), "%s", error ? error : "dynamic loader error");
         res = -2;
-    }
+    } else
+        res = 0;
     free_jvms(jvms, n);
     return res;
 }
@@ -556,15 +650,7 @@ const char *djni_mapped(int *vms) {
         return NULL;
     }
     /* With several JVM images, the VM count of one is not the answer. */
-    if (n == 1 && jvms[0].owns_created) {
-        JNI_GetCreatedJavaVMs_fnptr created;
-        *(void **) &created = dlsym(jvms[0].handle, "JNI_GetCreatedJavaVMs");
-        if (created) {
-            JavaVM *vm;
-            jsize count = 0;
-            if (created(&vm, 1, &count) == JNI_OK) *vms = (int) count;
-        }
-    }
+    if (n == 1) *vms = created_vms(&jvms[0]);
     if (n) {
         mapped_name = jvms[0].name;
         jvms[0].name = NULL;

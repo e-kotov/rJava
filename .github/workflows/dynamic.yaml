@@ -149,6 +149,10 @@ jobs:
           # A renamed jvm.dll cannot start a VM: JDK DLLs import jvm.dll by name.
           if [[ "$RUNNER_OS" != Windows ]]; then run renamed symlink; run hosted renamed; fi
           run decoy
+          # The file of a mapped JVM library is deleted, or replaced by B's.
+          run replaced deleted
+          run replaced replaced
+          if [[ "$RUNNER_OS" != Windows ]]; then run hosted replaced; fi
       - name: Remove hard links left in the JDK directories
         if: always() && env.RJE_JAVA_HOME_A != ''
         shell: bash

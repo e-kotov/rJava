@@ -44,7 +44,15 @@ forwards them to libjvm. Every HotSpot JDK in the matrix exports the three
 symbols; CI checks this for each runtime.
 
 Identity is then the file, not its name: device and inode on Linux and
-macOS, volume serial and file ID on Windows. So symbolic links, junctions,
+macOS, volume serial and file ID on Windows. The mapped side is the file the
+image was mapped from, not the file now at the name the loader recorded,
+which may have been deleted or replaced since: on Linux the mapping's entry
+in `/proc/self/maps`, on macOS the vnode of the mapped region
+(`proc_pidinfo` with `PROC_PIDREGIONPATHINFO`), on Windows the file
+`GetMappedFileNameW` names for the module, opened by its device path. So an
+upgrade that replaces the loaded library's file is not taken for the new
+runtime, and the same file is still accepted under any of its names.
+Symbolic links, junctions,
 hard links, 8.3 short names, other spellings and renamed copies of the
 loaded library are recognized: the same file is accepted, and djni
 references the mapped image rather than loading the alias. On Windows the
@@ -56,6 +64,9 @@ unverifiable file is rejected, and so is any selection while more than one
 JVM image is mapped (`RgetMappedJVM` then reports one of them with `vms`
 `-1`). If the loaded images cannot be listed, selection fails and
 `RgetMappedJVM` signals an error, so callers do not mistake it for "none".
+Once the mapped library has created a VM, the only runtime the process can
+run, selecting the exact name `RgetMappedJVM` reports attaches to it without
+comparing files, as `.jinit()` does; any other name is compared as above.
 
 ## Selected libraries are not unloaded
 
@@ -125,6 +136,8 @@ distribution with `sh mkdist`, installs it in an isolated library, and runs:
 | `alias link/spelling/short` | the same preloaded library through a symbolic link or junction with spaces and non-ASCII characters, an alternative spelling, and an 8.3 name (Windows) |
 | `renamed copy/hardlink/symlink` | a JVM library mapped under a name no JVM uses: a copy of B rejects A and B's own library; a hard link of A in its directory (and a symbolic link, Linux and macOS) rejects B, then the same file starts A (Windows: is rejected as mapped under another name) |
 | `hosted renamed` | native code creates the VM from the hard link; it is reported with one VM, B is rejected, and `.jinit()` attaches (Linux and macOS) |
+| `replaced deleted/replaced` | the file of the mapped library is deleted, or replaced by a hard link of B's (Windows: a mapped DLL cannot be deleted, so it is renamed in a copy of A's home and B's linked as `jvm.dll`): B, the replaced name and `.jinit()` with `JAVA_HOME` naming B are rejected, A's own file is accepted, and after replacement A starts |
+| `hosted replaced` | the same replacement after a host created the VM: B is rejected, `.jinit()` attaches to A (Linux and macOS) |
 | `decoy` | the JDK's `jli` library (JNI exports on macOS, no `JVM_` exports) is not reported and does not block selecting B |
 | `nonascii` | loading through such a path without a preload |
 | `fallback` | invalid `JAVA_HOME` warns and falls back to an independently computed home (HKCU registry entry on Windows, `java_home` on macOS, `java` on PATH on Linux) |
@@ -171,8 +184,14 @@ from the repository root, one process per scenario.
   lists no mapped libraries, so it cannot reject a conflict. It cannot see libraries
   in another `dlmopen()` namespace, and identifies a renamed JVM only by
   the exports above (a JVM without `JVM_CurrentTimeMillis` must keep its
-  usual name). It compares the file now at the recorded path: a mapped
-  library whose file was deleted or replaced is rejected, not matched. dyld
+  usual name). If the mapped file cannot be identified (no `/proc` on
+  Linux, a failed query), selection is rejected. On overlayfs (e.g. Docker)
+  with Linux before 6.8, `/proc/self/maps` reports the layer file's device,
+  while `stat()` reports the overlay's, so a preloaded library without a
+  created VM is rejected as unverifiable even when it is the same file;
+  attaching to a created VM through its reported name is unaffected. This
+  follows from the kernel source (`show_map_vma` uses `file_user_inode`
+  only from 6.8) and is not tested. dyld
   records a library loaded through a symbolic link by its target, so on
   macOS the `symlink` variant shows the target name.
 - Not covered: 32-bit Windows, Windows on ARM, Linux on ARM, musl, OpenJ9 and
