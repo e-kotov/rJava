@@ -1156,9 +1156,9 @@ REPC SEXP RloadJVM(SEXP sPath, SEXP sSilent) {
 }
 
 REPC SEXP RunloadJVM(void) {
-    int res;
-    if (rJava_JVM_state != JVM_STATE_NONE || existingJVMs() > 0)
-        Rf_error("Cannot unload a JVM that has been started; use a new R process.");
-    res = djni_unload();
-    return Rf_ScalarLogical((res < -1) ? 0 : 1);
+    /* dlclose/FreeLibrary success does not prove that the JVM and all its
+       dependencies were unmapped. In particular dyld retains TLS images. */
+    if (djni_loaded())
+        Rf_error("Cannot safely unload a selected JVM library; use a new R process.");
+    return Rf_ScalarLogical(1);
 }

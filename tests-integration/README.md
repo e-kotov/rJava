@@ -16,15 +16,15 @@ it in an isolated R library, and tests it on native Linux, macOS, and Windows
 runners with Temurin 17 and 21. Every scenario uses a new R process. The native
 library must have no direct JVM linkage. Tests cover selection after namespace
 load, recovery after missing-library/missing-JNI-export errors, JNI calls,
-and rejection of unloading a running JVM. They also install the rJavaEnv
+and rejection of unloading any selected JVM library. They also install the rJavaEnv
 feature branch and its two minimal downstream packages to test real Imports,
 setup, startup, compatible guards, and child-process isolation.
 
 To run locally, build and install the source tarball in a temporary library,
 then set `R_LIBS` to it and `RJE_JAVA_HOME_A`/`RJE_JAVA_HOME_B` to two real JDK
 homes. Run `Rscript --vanilla tests-integration/deferred.R select`, `retry`, and
-`unload` as separate commands. The last case reloads the **same** unstarted
-runtime, not a different JDK.
+`unload` as separate commands. The last case checks that unloading and changing
+a selected, unstarted runtime both fail cleanly, then starts that same runtime.
 
 ## Limits
 
@@ -35,7 +35,7 @@ all runtime symbols and dependencies were removed. In a local macOS experiment,
 loading Java 17, unloading before startup, then starting Java 27 failed with a
 Java 17/27 symbol mismatch. Do not use `.junloadJVM()` to switch JDKs.
 
-A started JVM cannot be unloaded by this R API. Restarting a worker process
+A selected JVM library cannot be unloaded by this R API, even before startup. Restarting a worker process
 remains the supported way to run another JVM. A package that calls `.jinit()`
 in `.onLoad()` still selects Java during package loading; this branch cannot
 make that package's initialization lazy.

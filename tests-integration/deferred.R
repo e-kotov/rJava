@@ -28,9 +28,10 @@ if (scenario == "retry") {
 } else if (scenario == "unload") {
   get(".jloadJVM", ns)(lib(home_a))
   stopifnot(state()$state == "none", !state()$initialized)
-  stopifnot(get(".junloadJVM", ns)(), state()$state == "not-loaded")
-  # Calls after unloading must not use stale function pointers.
-  stopifnot(state()$state == "not-loaded")
+  failed <- try(get(".junloadJVM", ns)(), silent = TRUE)
+  stopifnot(inherits(failed, "try-error"), state()$state == "none")
+  failed <- try(get(".jloadJVM", ns)(lib(home_b)), silent = TRUE)
+  stopifnot(inherits(failed, "try-error"), state()$state == "none")
 } else stopifnot(scenario == "select")
 selected <- if (scenario == "unload") home_a else home_b
 Sys.setenv(JAVA_HOME = selected)
