@@ -20,8 +20,18 @@ int djni_loaded(void);
    loading one; *vms is the number of created VMs, -1 if unknown */
 const char* djni_mapped(int *vms);
 
-jint JNI_GetDefaultJavaVMInitArgs(void *args);
-jint JNI_CreateJavaVM(JavaVM **pvm, void **penv, void *args);
-jint JNI_GetCreatedJavaVMs(JavaVM **vmBuf, jsize bufLen, jsize *nVMs);
+/* The wrappers below have the names of the JVM exports. Hide them, so that
+   calls from rJava bind to the wrappers even if a JVM library was loaded
+   with global symbols, as by the java launcher of an application
+   embedding R; ELF symbol interposition would otherwise bypass djni. */
+#if defined(__GNUC__) && !defined(_WIN32)
+#define DJNI_LOCAL __attribute__((visibility("hidden")))
+#else
+#define DJNI_LOCAL
+#endif
+
+DJNI_LOCAL jint JNI_GetDefaultJavaVMInitArgs(void *args);
+DJNI_LOCAL jint JNI_CreateJavaVM(JavaVM **pvm, void **penv, void *args);
+DJNI_LOCAL jint JNI_GetCreatedJavaVMs(JavaVM **vmBuf, jsize bufLen, jsize *nVMs);
 
 #endif
