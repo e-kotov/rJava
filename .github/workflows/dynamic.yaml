@@ -56,9 +56,10 @@ jobs:
           set -euo pipefail
           for home in "$JAVA_A" "$JAVA_B"; do
             echo "== $home"; "$home/bin/java" -version 2>&1
-            find "$home" \( -name 'libjvm.*' -o -name jvm.dll \) -print
+            # The trailing slash follows a home that is a symbolic link (Linux).
+            find "$home/" \( -name 'libjvm.*' -o -name jvm.dll \) -print
             # djni recognizes a JVM library under any name by these exports.
-            lib="$(find "$home" \( -name 'libjvm.*' -o -name jvm.dll \) -path '*server*' -print -quit)"
+            lib="$(find "$home/" \( -name 'libjvm.*' -o -name jvm.dll \) -path '*server*' -print -quit)"
             case "$RUNNER_OS" in
               Linux) syms="$(nm -D --defined-only "$lib")" ;;
               macOS) syms="$(nm -gU "$lib")" ;;
@@ -149,11 +150,11 @@ jobs:
           if [[ "$RUNNER_OS" != Windows ]]; then run renamed symlink; run hosted renamed; fi
           run decoy
       - name: Remove hard links left in the JDK directories
-        if: always()
+        if: always() && env.RJE_JAVA_HOME_A != ''
         shell: bash
         run: |
           # A mapped DLL cannot be deleted, so Windows leaves them behind until here.
-          find "$RJE_JAVA_HOME_A" "$RJE_JAVA_HOME_B" -name 'rjava-alias-*' -print -delete
+          find "$RJE_JAVA_HOME_A/" "$RJE_JAVA_HOME_B/" -name 'rjava-alias-*' -print -delete
       - name: Embed R in a Java host through JRI
         if: runner.os != 'Windows'
         shell: bash
