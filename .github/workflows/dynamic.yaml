@@ -107,19 +107,32 @@ jobs:
       - name: Compare src/jni.h with the JDK headers
         shell: bash
         run: Rscript --vanilla tests-integration/jni-abi.R "$RJE_JAVA_HOME_A" "$RJE_JAVA_HOME_B"
+      - name: Build a native helper that creates a JVM outside rJava
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/jvmhost"
+          cp tests-integration/jvmhost.c "$RUNNER_TEMP/jvmhost/"
+          src="$PWD/src"
+          if [[ "$RUNNER_OS" == Windows ]]; then src="$(cygpath -m "$src")"; fi
+          (cd "$RUNNER_TEMP/jvmhost" && PKG_CPPFLAGS="-I$src" R CMD SHLIB jvmhost.c)
+          echo "RJE_JVMHOST=$(ls "$RUNNER_TEMP"/jvmhost/jvmhost.{so,dll} 2>/dev/null)" >> "$GITHUB_ENV"
       - name: Check deferred loading in fresh processes
         shell: bash
         run: |
           set -euo pipefail
           run() { echo "::group::$*"; Rscript --vanilla tests-integration/deferred.R "$@"; echo "::endgroup::"; }
-          for scenario in select retry badinput unload preloaded nonascii fallback laterload jengine; do
+          for scenario in select retry badinput unload preloaded nonascii fallback laterload hosted; do
             run "$scenario"
           done
+          # Windows source installs build no JRI (pre-existing upstream build defects).
+          if [[ "$RUNNER_OS" != Windows ]]; then run jengine; fi
           run preloaded global
           run alias link
           run alias spelling
           if [[ "$RUNNER_OS" == Windows ]]; then run alias short; fi
       - name: Embed R in a Java host through JRI
+        if: runner.os != 'Windows'
         shell: bash
         timeout-minutes: 5
         run: Rscript --vanilla tests-integration/jri.R
@@ -140,6 +153,34 @@ jobs:
           w() { cygpath -w "$1"; }
           PATH="/c/Windows/System32:/c/Windows" "$work/dll-search.exe" \
             "$(w "$work/missing/bin/server/jvm.dll")" "$(w "$work/copy/bin/server/jvm.dll")" "$(w "$work/missing/bin")"
+      - name: Start Java without the system VC++ runtime (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Runner images install the VC++ runtime in System32, which masks
+          # whether JVM dependencies resolve from the JDK. Hide it: jvm.dll and
+          # its startup libraries must still load. Later loads that import
+          # another runtime DLL (awt.dll -> MSVCP140.dll) are recorded only.
+          $hidden = @()
+          foreach ($f in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
+            $p = Join-Path $env:SystemRoot "System32\$f"
+            if (Test-Path $p) {
+              takeown /f $p | Out-Null
+              icacls $p /grant '*S-1-5-32-544:F' | Out-Null
+              Rename-Item $p "$f.rjava-hidden"
+              $hidden += $p
+            }
+          }
+          Write-Output "Hidden: $hidden"
+          Get-ChildItem "$env:RJE_JAVA_HOME_A" -Recurse -Include 'msvc*.dll', 'vcruntime*.dll' | ForEach-Object FullName
+          Rscript --vanilla tests-integration/deferred.R select
+          $select = $LASTEXITCODE
+          Rscript --vanilla tests-integration/deferred.R laterload
+          $later = $LASTEXITCODE
+          foreach ($p in $hidden) { Rename-Item "$p.rjava-hidden" (Split-Path $p -Leaf) }
+          Write-Output "EVIDENCE without System32 VC++ runtime: select exit $select, laterload exit $later"
+          if ($select -ne 0) { exit 1 }
+          exit 0
       - uses: actions/checkout@v4
         if: matrix.downstream
         with:

@@ -232,6 +232,25 @@ switch(scenario,
     later_loads()
     stopifnot(identical(minimal_path, Sys.getenv("PATH")))
   },
+  hosted = {
+    # Native code in this process created a JVM before rJava was used. rJava
+    # must attach to it, although JAVA_HOME names another runtime. A host
+    # provides rJava's class loader on its class path (JDK 9+ forbids adding it).
+    helper <- Sys.getenv("RJE_JVMHOST")
+    stopifnot(file.exists(helper))
+    dyn.load(helper)
+    boot <- file.path(system.file("java", package = "rJava"), "boot")
+    old <- Sys.getenv("PATH")
+    if (windows) Sys.setenv(PATH = paste(normalizePath(dirname(dirname(lib(home_a))), winslash = "\\"), old, sep = ";"))
+    created <- .C("rjava_test_create_jvm", lib(home_a), paste0("-Djava.class.path=", boot), result = 0L)$result
+    Sys.setenv(PATH = old)
+    stopifnot(created == 0L)
+    mapped <- .Call(internal("RgetMappedJVM"))
+    stopifnot(!is.null(mapped), identical(mapped$vms, 1L), state()$state == "not-loaded")
+    Sys.setenv(JAVA_HOME = home_b)
+    start(home_a)
+    stopifnot(state()$state == "attached")
+  },
   jengine = {
     # R hosts the JVM, then JRI is loaded into it as a later native library.
     jri <- system.file("jri", package = "rJava")
