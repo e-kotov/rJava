@@ -4,6 +4,7 @@ name: check
 
 jobs:
   check:
+    if: github.ref != 'refs/heads/feature/dynamic-cross-platform'
     runs-on: ${{ matrix.os }}
     env:
       NOAWT: 1

@@ -1143,7 +1143,7 @@ REPC SEXP RloadJVM(SEXP sPath, SEXP sSilent) {
     if (TYPEOF(sPath) != STRSXP || LENGTH(sPath) != 1)
 	Rf_error("Invalid path to JVM library");
     /* FIXME: worry about encoding? */
-    path = CHAR(STRING_ELT(sPath, 0));
+    path = Rf_translateCharUTF8(STRING_ELT(sPath, 0));
     res = djni_load(path);
     if (silent)
 	return Rf_ScalarInteger(res);
@@ -1157,10 +1157,8 @@ REPC SEXP RloadJVM(SEXP sPath, SEXP sSilent) {
 
 REPC SEXP RunloadJVM(void) {
     int res;
-    if (rJava_JVM_state == JVM_STATE_CREATED ||
-	rJava_JVM_state == JVM_STATE_ATTACHED) {
-	destroyJVM();
-    }
+    if (rJava_JVM_state != JVM_STATE_NONE || existingJVMs() > 0)
+        Rf_error("Cannot unload a JVM that has been started; use a new R process.");
     res = djni_unload();
     return Rf_ScalarLogical((res < -1) ? 0 : 1);
 }

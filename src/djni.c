@@ -1,171 +1,101 @@
+/* Dynamic JNI loader: no JVM dependency is resolved at namespace load. */
 #ifdef _WIN32
+#define _WIN32_WINNT 0x0602
 #include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 #include <stdio.h>
 #include "djni.h"
 
 static JNI_GetDefaultJavaVMInitArgs_fnptr JNI_GetDefaultJavaVMInitArgs_fn;
 static JNI_CreateJavaVM_fnptr JNI_CreateJavaVM_fn;
 static JNI_GetCreatedJavaVMs_fnptr JNI_GetCreatedJavaVMs_fn;
+#ifdef _WIN32
+static HMODULE jni_dl;
+#else
+static void *jni_dl;
+#endif
+static char last_error[1024];
 
-static HMODULE jni_hmodule = NULL;
-static char last_error_buf[1024];
-
-static int load_sym(const char *sym, void **ptr) {
-    void *v = (void*)GetProcAddress(jni_hmodule, sym);
-    if (!v) {
-        DWORD err = GetLastError();
-        FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 
-                       NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), 
-                       last_error_buf, sizeof(last_error_buf), NULL);
-        FreeLibrary(jni_hmodule);
-        jni_hmodule = NULL;
-        return -1;
-    }
-    *ptr = v;
-    return 0;    
+static void clear_symbols(void) {
+    JNI_GetDefaultJavaVMInitArgs_fn = 0;
+    JNI_CreateJavaVM_fn = 0;
+    JNI_GetCreatedJavaVMs_fn = 0;
 }
-
+static void save_error(void) {
+#ifdef _WIN32
+    DWORD code = GetLastError();
+    snprintf(last_error, sizeof(last_error), "Windows loader error %lu", (unsigned long) code);
+#else
+    const char *error = dlerror();
+    snprintf(last_error, sizeof(last_error), "%s", error ? error : "dynamic loader error");
+#endif
+}
+static int load_sym(const char *sym, void **ptr) {
+#ifdef _WIN32
+    *ptr = (void *) GetProcAddress(jni_dl, sym);
+#else
+    *ptr = dlsym(jni_dl, sym);
+#endif
+    if (!*ptr) { save_error(); return -1; }
+    return 0;
+}
 int djni_load(const char *path) {
-    last_error_buf[0] = 0;
-    if (jni_hmodule) return -1;
-    
-    // Use LoadLibraryEx with LOAD_WITH_ALTERED_SEARCH_PATH to handle dependencies
-    // located in the same directory as jvm.dll (e.g. msvcr*.dll)
-    jni_hmodule = LoadLibraryExA(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
-    
-    if (!jni_hmodule) {
-        DWORD err = GetLastError();
-        FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 
-                       NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), 
-                       last_error_buf, sizeof(last_error_buf), NULL);
-        return -2;
+    last_error[0] = 0;
+    if (jni_dl) return -1;
+#ifdef _WIN32
+    wchar_t wide_path[32768], bin_path[32768], *slash;
+    DLL_DIRECTORY_COOKIE cookie = 0;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide_path, 32768)) {
+        save_error(); return -2;
     }
-    
-    if (load_sym("JNI_GetDefaultJavaVMInitArgs", (void**) &JNI_GetDefaultJavaVMInitArgs_fn) ||
-        load_sym("JNI_CreateJavaVM", (void**) &JNI_CreateJavaVM_fn) ||
-        load_sym("JNI_GetCreatedJavaVMs", (void**) &JNI_GetCreatedJavaVMs_fn)) {
-        JNI_GetDefaultJavaVMInitArgs_fn = 0;
-        JNI_CreateJavaVM_fn = 0;
-        JNI_GetCreatedJavaVMs_fn = 0;
-        FreeLibrary(jni_hmodule);
-        jni_hmodule = NULL;
+    /* JDK 8 needs its bin directory as well as bin/server for dependent DLLs. */
+    wcscpy(bin_path, wide_path);
+    for (slash = bin_path; *slash; slash++) if (*slash == L'/') *slash = L'\\';
+    slash = wcsrchr(bin_path, L'\\');
+    if (slash) {
+        *slash = 0;
+        slash = wcsrchr(bin_path, L'\\');
+        if (slash) { *slash = 0; cookie = AddDllDirectory(bin_path); }
+    }
+    jni_dl = LoadLibraryExW(wide_path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if (!jni_dl) save_error();
+    if (cookie) RemoveDllDirectory(cookie);
+#else
+    jni_dl = dlopen(path, RTLD_LOCAL | RTLD_NOW);
+    if (!jni_dl) save_error();
+#endif
+    if (!jni_dl) return -2;
+    if (load_sym("JNI_GetDefaultJavaVMInitArgs", (void **) &JNI_GetDefaultJavaVMInitArgs_fn) ||
+        load_sym("JNI_CreateJavaVM", (void **) &JNI_CreateJavaVM_fn) ||
+        load_sym("JNI_GetCreatedJavaVMs", (void **) &JNI_GetCreatedJavaVMs_fn)) {
+        djni_unload();
         return -3;
     }
     return 0;
 }
-
 int djni_unload(void) {
-    if (jni_hmodule) {
-        if (!FreeLibrary(jni_hmodule))
-            return -2;
-        jni_hmodule = NULL;
-        return 0;
-    }
-    return -1;  
-}
-
-int djni_loaded(void) {
-    return jni_hmodule ? 1 : 0;
-}
-
-const char* djni_last_error(void) {
-    return last_error_buf;
-}
-
-// Pass-through functions
-jint JNI_GetDefaultJavaVMInitArgs(void *args) {
-    return JNI_GetDefaultJavaVMInitArgs_fn ? JNI_GetDefaultJavaVMInitArgs_fn(args) : -99;
-}
-
-jint JNI_CreateJavaVM(JavaVM **pvm, void **penv, void *args) {
-    return JNI_CreateJavaVM_fn ? JNI_CreateJavaVM_fn(pvm, penv, args) : -99;
-}
-
-jint JNI_GetCreatedJavaVMs(JavaVM **vmBuf, jsize bufLen, jsize *nVMs) {
-    return JNI_GetCreatedJavaVMs_fn ? JNI_GetCreatedJavaVMs_fn(vmBuf, bufLen, nVMs) : -99;
-}
-
+    if (!jni_dl) return -1;
+#ifdef _WIN32
+    if (!FreeLibrary(jni_dl)) { save_error(); return -2; }
 #else
-/* ... Existing POSIX code goes here (keep existing src/djni.c content in #else block) ... */
-#include <dlfcn.h>
-
-#include "djni.h"
-
-static JNI_GetDefaultJavaVMInitArgs_fnptr JNI_GetDefaultJavaVMInitArgs_fn;
-static JNI_CreateJavaVM_fnptr JNI_CreateJavaVM_fn;
-static JNI_GetCreatedJavaVMs_fnptr JNI_GetCreatedJavaVMs_fn;
-
-static void *jni_dl = 0;
-
-static const char *last_error = 0;
-
-static int load_sym(const char *sym, void **ptr) {
-    void *v = dlsym(jni_dl, sym);
-    if (!v) {
-	last_error = dlerror();
-	dlclose(jni_dl);
-	jni_dl = 0;
-	return -1;
-    }
-    *ptr = v;
-    return 0;    
-}
-
-/* path: path to libjvm
-   returns: 0 = success, -1 = already loaded, -2 = dlopen error, -3 symbols not found */
-int djni_load(const char *path) {
-    last_error = 0;
-    if (jni_dl) return -1;
-    jni_dl = dlopen(path, RTLD_LOCAL | RTLD_NOW);
-    if (!jni_dl) {
-	last_error = dlerror();	
-	return -2;
-    }
-    if (load_sym("JNI_GetDefaultJavaVMInitArgs", (void**) &JNI_GetDefaultJavaVMInitArgs_fn) ||
-	load_sym("JNI_CreateJavaVM", (void**) &JNI_CreateJavaVM_fn) ||
-	load_sym("JNI_GetCreatedJavaVMs", (void**) &JNI_GetCreatedJavaVMs_fn)) {
-	JNI_GetDefaultJavaVMInitArgs_fn = 0;
-	JNI_CreateJavaVM_fn = 0;
-	JNI_GetCreatedJavaVMs_fn = 0;
-	dlclose(jni_dl);
-	jni_dl = 0;
-	return -3;
-    }
+    if (dlclose(jni_dl)) { save_error(); return -2; }
+#endif
+    jni_dl = 0;
+    clear_symbols();
     return 0;
 }
-
-/* returns: 0 = success, -1 = noting loaded, -2 = unload failed */
-int djni_unload(void) {
-    if (jni_dl) {
-	if (dlclose(jni_dl))
-	    return -2;
-	jni_dl = 0;
-	return 0;
-    }
-    return -1;  
-}
-
-int djni_loaded(void) {
-    return jni_dl ? 1 : 0;
-}
-
-const char* djni_last_error(void) {
-    return last_error;
-}
-
-/* The following are the "normal" JNI API calls which are routed to libjvm JNI API.
-   If no JNI was loaded, they return -99 to distinguish it from JNI error codes. */
-
+int djni_loaded(void) { return jni_dl ? 1 : 0; }
+const char *djni_last_error(void) { return last_error[0] ? last_error : 0; }
 jint JNI_GetDefaultJavaVMInitArgs(void *args) {
-    return JNI_GetDefaultJavaVMInitArgs_fn ? JNI_GetDefaultJavaVMInitArgs_fn(args) : -99;
+    return JNI_GetDefaultJavaVMInitArgs_fn ? JNI_GetDefaultJavaVMInitArgs_fn(args) : JNI_NO_DJNI;
 }
-
 jint JNI_CreateJavaVM(JavaVM **pvm, void **penv, void *args) {
-    return JNI_CreateJavaVM_fn ? JNI_CreateJavaVM_fn(pvm, penv, args) : -99;
+    return JNI_CreateJavaVM_fn ? JNI_CreateJavaVM_fn(pvm, penv, args) : JNI_NO_DJNI;
 }
-
 jint JNI_GetCreatedJavaVMs(JavaVM **vmBuf, jsize bufLen, jsize *nVMs) {
-    return JNI_GetCreatedJavaVMs_fn ? JNI_GetCreatedJavaVMs_fn(vmBuf, bufLen, nVMs) : -99;
+    return JNI_GetCreatedJavaVMs_fn ? JNI_GetCreatedJavaVMs_fn(vmBuf, bufLen, nVMs) : JNI_NO_DJNI;
 }
 
 /* define DJNI_MAIN_TEST to test the load + create + print version + destroy + unload cycle
@@ -249,13 +179,13 @@ static int run_jvm_test(void) {
 int test_jvm(const char *path) {
     int e = djni_load(path);
     if (e) {
-	printf("Cannot load: %d (%s)\n", e, last_error ? last_error : "not a dl error");
+	printf("Cannot load: %d (%s)\n", e, djni_last_error() ? djni_last_error() : "not a dl error");
 	return 1;
     }
     printf("JVM Loaded!\n");
     if (!run_jvm_test()) {
 	if (djni_unload())
-	    fprintf(stderr, "ERROR: cannot unload JNI (%s)\n", last_error ? last_error : "no information");
+	    fprintf(stderr, "ERROR: cannot unload JNI (%s)\n", djni_last_error() ? djni_last_error() : "no information");
 	else
 	    printf("JNI unloaded.\n");
     }
@@ -294,5 +224,4 @@ int main(int ac, char **av) {
     return 0;
 }
 
-#endif
 #endif

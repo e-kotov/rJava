@@ -1,0 +1,76 @@
+name: Deferred JVM integration
+on:
+  push:
+    branches: [feature/dynamic-cross-platform]
+  workflow_dispatch:
+jobs:
+  dynamic:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      NOAWT: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+          rtools-version: '45'
+      - uses: actions/setup-java@v5
+        id: java17
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-java@v5
+        id: java21
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Configure build Java
+        if: runner.os != 'Windows'
+        shell: bash
+        run: sudo R CMD javareconf
+      - name: Generate distribution and install in isolated library
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh mkdist
+          mkdir -p "$RUNNER_TEMP/rjava-lib"
+          archive="$(ls ../rJava_*.tar.gz)"
+          R CMD INSTALL --library="$RUNNER_TEMP/rjava-lib" "$archive"
+          echo "R_LIBS_USER=$RUNNER_TEMP/rjava-lib" >> "$GITHUB_ENV"
+      - name: Check deferred loading in fresh processes
+        shell: bash
+        env:
+          RJE_JAVA_HOME_A: ${{ steps.java17.outputs.path }}
+          RJE_JAVA_HOME_B: ${{ steps.java21.outputs.path }}
+        run: |
+          set -euo pipefail
+          for scenario in select retry unload; do
+            Rscript --vanilla tests-integration/deferred.R "$scenario"
+          done
+      - name: Inspect native JVM linkage
+        shell: bash
+        run: |
+          set -euo pipefail
+          lib="$(Rscript --vanilla -e 'cat(system.file("libs", package="rJava"))')"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            objdump -p "$lib/x64/rJava.dll" > "$RUNNER_TEMP/linkage.txt"
+          elif [[ "$RUNNER_OS" == macOS ]]; then
+            otool -L "$lib/rJava.so" > "$RUNNER_TEMP/linkage.txt"
+          else
+            ldd "$lib/rJava.so" > "$RUNNER_TEMP/linkage.txt"
+          fi
+          cat "$RUNNER_TEMP/linkage.txt"
+          if grep -Ei '(libjvm|DLL Name: jvm.dll)' "$RUNNER_TEMP/linkage.txt"; then exit 1; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dynamic-${{ matrix.os }}
+          path: |
+            ../rJava_*.tar.gz
+            ${{ runner.temp }}/linkage.txt

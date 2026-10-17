@@ -43,37 +43,6 @@
 }
 
 .onLoad <- function(libname, pkgname) {
-    # Attempt to find Java to set up PATH if possible, but do NOT fail if missing
-    # This preserves 'old' behavior if Java is present, but allows 'new' behavior if not.
-    javahome <- .find.java.runtime()
-
-    if (!is.null(javahome) && nzchar(javahome)) {
-        OPATH <- Sys.getenv("PATH")
-        # Add bin/server etc to path (logic copied from original)
-        paths <- character()
-        paths <- c(
-            paths,
-            file.path(javahome, "bin", "client"),
-            file.path(javahome, "bin", "server"),
-            file.path(javahome, "bin"),
-            file.path(javahome, "jre", "bin", "server"),
-            file.path(javahome, "jre", "bin", "client")
-        )
-
-        cpc <- strsplit(OPATH, ";", fixed = TRUE)[[1]]
-        curPath <- OPATH
-        for (path in unique(paths)) {
-            if (!path %in% cpc && file.exists(path)) {
-                curPath <- paste(path, curPath, sep = ";")
-            }
-        }
-
-        if (curPath != OPATH) Sys.setenv(PATH = curPath)
-    }
-
-    # Load rJava.dll (now without jvm.dll dependency)
     library.dynam("rJava", pkgname, libname)
-
-    # Initialize internal C variables
     .jfirst(libname, pkgname)
 }
