@@ -227,8 +227,9 @@ switch(scenario,
     start(expected)
   },
   laterload = {
-    Sys.setenv(JAVA_HOME = home_a)
-    start(home_a)
+    home <- if (variant == "b") home_b else home_a
+    Sys.setenv(JAVA_HOME = home)
+    start(home)
     later_loads()
     stopifnot(identical(minimal_path, Sys.getenv("PATH")))
   },
