@@ -9,8 +9,8 @@ safety for every system.
 ## Contract
 
 Loading the rJava namespace, including through another package's Imports,
-does not select, load, or initialize Java. The first `.jinit()` (or
-`.jloadJVM()`) selects a JVM library, in this order:
+does not select, load, or initialize Java. The first `.jinit()` selects a
+JVM library in this order:
 
 1. A JVM already created in the process, e.g. by a Java application
    embedding R through JRI: rJava attaches to it whatever Java home is
@@ -80,8 +80,8 @@ replaced, or cannot be identified (overlayfs, below). It never selects an
 image without a created VM, never resolves an ambiguity between several
 images, and fails if the image lacks a JNI entry point. On Windows it does
 not apply the `jvm.dll` name rule, which concerns starting a VM (untested:
-the JDK cannot start a VM from a renamed `jvm.dll`). No
-exported function attaches without a path.
+the JDK cannot start a VM from a renamed `jvm.dll`). The native attach entry
+point has no exported R wrapper.
 
 ## Selected libraries are not unloaded
 
