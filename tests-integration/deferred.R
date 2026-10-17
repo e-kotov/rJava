@@ -21,7 +21,8 @@ if (scenario == "retry") {
   failed <- try(rJava::.jinit(), silent = TRUE)
   stopifnot(inherits(failed, "try-error"), state()$state == "not-loaded")
   # A native library with no JNI exports must fail cleanly and permit retry.
-  wrong <- getLoadedDLLs()[["rJava"]][["path"]]
+  loadNamespace("stats")
+  wrong <- getLoadedDLLs()[["stats"]][["path"]]
   failed <- try(get(".jloadJVM", ns)(wrong), silent = TRUE)
   stopifnot(inherits(failed, "try-error"), state()$state == "not-loaded")
 } else if (scenario == "unload") {
@@ -31,11 +32,12 @@ if (scenario == "retry") {
   # Calls after unloading must not use stale function pointers.
   stopifnot(state()$state == "not-loaded")
 } else stopifnot(scenario == "select")
-Sys.setenv(JAVA_HOME = home_b)
+selected <- if (scenario == "unload") home_a else home_b
+Sys.setenv(JAVA_HOME = selected)
 rJava::.jinit()
 stopifnot(state()$initialized, state()$state == "created")
 actual <- rJava::.jcall("java/lang/System", "S", "getProperty", "java.home")
-stopifnot(identical(normalizePath(actual), normalizePath(home_b)))
+stopifnot(identical(normalizePath(actual), normalizePath(selected)))
 # Exercise JNI signatures, references, arrays and exceptions, beyond initialization.
 obj <- rJava::.jnew("java/lang/String", "deferred")
 stopifnot(rJava::.jcall(obj, "I", "length") == 8L,

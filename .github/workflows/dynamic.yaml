@@ -42,7 +42,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/rjava-lib"
           archive="$(ls ../rJava_*.tar.gz)"
           R CMD INSTALL --library="$RUNNER_TEMP/rjava-lib" "$archive"
-          echo "R_LIBS_USER=$RUNNER_TEMP/rjava-lib" >> "$GITHUB_ENV"
+          cp "$archive" "$RUNNER_TEMP/"
+          echo "R_LIBS=$RUNNER_TEMP/rjava-lib" >> "$GITHUB_ENV"
       - name: Check deferred loading in fresh processes
         shell: bash
         env:
@@ -72,5 +73,5 @@ jobs:
         with:
           name: dynamic-${{ matrix.os }}
           path: |
-            ../rJava_*.tar.gz
+            ${{ runner.temp }}/rJava_*.tar.gz
             ${{ runner.temp }}/linkage.txt

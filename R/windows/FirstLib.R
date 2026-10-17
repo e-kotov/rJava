@@ -10,8 +10,7 @@
     }
 
     if (nzchar(javahome) && !dir.exists(javahome)) {
-        warning("Java home setting is INVALID, it will be ignored.")
-        javahome <- ""
+        stop("Java home setting is invalid: ", javahome)
     }
 
     # If not found, try Registry
