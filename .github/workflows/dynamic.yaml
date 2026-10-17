@@ -71,7 +71,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: e-kotov/rJavaEnv
-          ref: 9dd898e
+          ref: 9dd898e6a6d910ecae246c0771b7d5eb270031c4
           path: downstream-source
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
