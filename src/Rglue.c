@@ -1142,8 +1142,13 @@ REPC SEXP RloadJVM(SEXP sPath, SEXP sSilent) {
     int res, silent = Rf_asInteger(sSilent);
     if (TYPEOF(sPath) != STRSXP || LENGTH(sPath) != 1)
 	Rf_error("Invalid path to JVM library");
-    /* FIXME: worry about encoding? */
-    path = Rf_translateCharUTF8(STRING_ELT(sPath, 0));
+#ifdef _WIN32
+    path = Rf_translateCharUTF8(STRING_ELT(sPath, 0)); /* djni converts to UTF-16 */
+#else
+    path = Rf_translateChar(STRING_ELT(sPath, 0)); /* dlopen uses native bytes */
+#endif
+    if (!*path)
+	Rf_error("Invalid path to JVM library");
     res = djni_load(path);
     if (silent)
 	return Rf_ScalarInteger(res);
@@ -1162,4 +1167,26 @@ REPC SEXP RunloadJVM(void) {
     if (djni_loaded())
         Rf_error("Cannot safely unload a selected JVM library; use a new R process.");
     return Rf_ScalarLogical(1);
+}
+
+/* list(path, vms) for a JVM library already mapped into the process, e.g. by
+   a Java application embedding R, or NULL. Nothing is loaded or initialized. */
+REPC SEXP RgetMappedJVM(void) {
+    int vms;
+    const char *path = djni_mapped(&vms);
+    SEXP res, names;
+    if (!path) return R_NilValue;
+    res = PROTECT(Rf_allocVector(VECSXP, 2));
+    names = PROTECT(Rf_allocVector(STRSXP, 2));
+#ifdef _WIN32
+    SET_VECTOR_ELT(res, 0, Rf_ScalarString(Rf_mkCharCE(path, CE_UTF8)));
+#else
+    SET_VECTOR_ELT(res, 0, Rf_mkString(path));
+#endif
+    SET_VECTOR_ELT(res, 1, Rf_ScalarInteger(vms));
+    SET_STRING_ELT(names, 0, Rf_mkChar("path"));
+    SET_STRING_ELT(names, 1, Rf_mkChar("vms"));
+    Rf_setAttrib(res, R_NamesSymbol, names);
+    UNPROTECT(2);
+    return res;
 }

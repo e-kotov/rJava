@@ -16,6 +16,9 @@ int djni_load(const char *path);
 int djni_unload(void);
 const char* djni_last_error(void);
 int djni_loaded(void);
+/* path of a JVM library already mapped into the process (or NULL), without
+   loading one; *vms is the number of created VMs, -1 if unknown */
+const char* djni_mapped(int *vms);
 
 jint JNI_GetDefaultJavaVMInitArgs(void *args);
 jint JNI_CreateJavaVM(JavaVM **pvm, void **penv, void *args);
