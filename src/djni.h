@@ -17,7 +17,9 @@ int djni_unload(void);
 const char* djni_last_error(void);
 int djni_loaded(void);
 /* path of a JVM library already mapped into the process (or NULL), without
-   loading one; *vms is the number of created VMs, -1 if unknown */
+   loading one; *vms is the number of created VMs, -1 if unknown (also if
+   several JVM libraries are mapped). NULL with *vms == -2 means the mapped
+   libraries could not be listed, see djni_last_error(). */
 const char* djni_mapped(int *vms);
 
 /* The wrappers below have the names of the JVM exports. Hide them, so that

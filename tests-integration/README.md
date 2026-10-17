@@ -30,11 +30,32 @@ error. Every failure before a library is loaded leaves the state
 `"not-loaded"`, so the setting can be corrected and `.jinit()` retried.
 
 If another JVM library is mapped into the process without a created VM,
-only the same file can be selected. Identity is the file, not its name:
-device and inode on Linux and macOS, volume serial and file ID on Windows.
-So symbolic links, junctions, 8.3 short names and other spellings of the
-loaded library are accepted, and djni references the mapped module rather
-than loading the alias. A different or unverifiable file is rejected.
+only the same file can be selected. djni finds mapped JVM libraries among
+all images the dynamic loader lists (`dl_iterate_phdr` on Linux, dyld on
+macOS, `EnumProcessModules` on Windows), without loading anything. An image
+is a JVM library if it has a JVM library name (`libjvm.so`, `libjvm.dylib`,
+`jvm.dll`), even if malformed, or whatever its name if it defines itself
+`JNI_CreateJavaVM`, `JNI_GetCreatedJavaVMs` and `JVM_CurrentTimeMillis`.
+"Defines itself" excludes definitions inherited from a dependency
+(the symbol address lies outside the image) and forwarded Windows exports
+(read from the export table in memory). JNI exports alone do not suffice:
+rJava's own wrappers have them, and so does the macOS `libjli`, which
+forwards them to libjvm. Every HotSpot JDK in the matrix exports the three
+symbols; CI checks this for each runtime.
+
+Identity is then the file, not its name: device and inode on Linux and
+macOS, volume serial and file ID on Windows. So symbolic links, junctions,
+hard links, 8.3 short names, other spellings and renamed copies of the
+loaded library are recognized: the same file is accepted, and djni
+references the mapped image rather than loading the alias. On Windows the
+same file is rejected if mapped under another module name than `jvm.dll`:
+the JDK's DLLs import `jvm.dll` by name, and the loader matches loaded
+modules by base name, so starting a VM would load another `jvm.dll` or
+fail. A different or
+unverifiable file is rejected, and so is any selection while more than one
+JVM image is mapped (`RgetMappedJVM` then reports one of them with `vms`
+`-1`). If the loaded images cannot be listed, selection fails and
+`RgetMappedJVM` signals an error, so callers do not mistake it for "none".
 
 ## Selected libraries are not unloaded
 
@@ -102,10 +123,14 @@ distribution with `sh mkdist`, installs it in an isolated library, and runs:
 | `unload` | unloading or changing a selected, unstarted library fails |
 | `preloaded`, `preloaded global` | a library mapped outside rJava (also with global symbols) rejects another runtime and permits the same one |
 | `alias link/spelling/short` | the same preloaded library through a symbolic link or junction with spaces and non-ASCII characters, an alternative spelling, and an 8.3 name (Windows) |
+| `renamed copy/hardlink/symlink` | a JVM library mapped under a name no JVM uses: a copy of B rejects A and B's own library; a hard link of A in its directory (and a symbolic link, Linux and macOS) rejects B, then the same file starts A (Windows: is rejected as mapped under another name) |
+| `hosted renamed` | native code creates the VM from the hard link; it is reported with one VM, B is rejected, and `.jinit()` attaches (Linux and macOS) |
+| `decoy` | the JDK's `jli` library (JNI exports on macOS, no `JVM_` exports) is not reported and does not block selecting B |
 | `nonascii` | loading through such a path without a preload |
 | `fallback` | invalid `JAVA_HOME` warns and falls back to an independently computed home (HKCU registry entry on Windows, `java_home` on macOS, `java` on PATH on Linux) |
 | `laterload` | the later native loads above |
 | `hosted` | native code creates a JVM, then `.jinit()` attaches to it although `JAVA_HOME` names the other JDK |
+| every scenario | before anything is mapped, `RgetMappedJVM` is `NULL`: rJava's own JNI wrappers are not taken for a JVM |
 | `jengine`, `jri.R` | JRI started from R; a Java host embedding R, where rJava attaches to the host JVM (Linux and macOS) |
 | `dll-search.c` | Windows DLL search state after failed and successful loads |
 | downstream | rJavaEnv and two minimal consumer packages (current pair only) |
@@ -142,6 +167,14 @@ from the repository root, one process per scenario.
   ship on Windows. JRI embedding is therefore tested on Linux and macOS only;
   attaching to a created JVM is tested on Windows with the native helper.
 - Windows AWT later loads depend on a VC++ runtime outside the JDK, as above.
+- Mapped JVM discovery covers Linux, macOS and Windows only; elsewhere djni
+  lists no mapped libraries, so it cannot reject a conflict. It cannot see libraries
+  in another `dlmopen()` namespace, and identifies a renamed JVM only by
+  the exports above (a JVM without `JVM_CurrentTimeMillis` must keep its
+  usual name). It compares the file now at the recorded path: a mapped
+  library whose file was deleted or replaced is rejected, not matched. dyld
+  records a library loaded through a symbolic link by its target, so on
+  macOS the `symlink` variant shows the target name.
 - Not covered: 32-bit Windows, Windows on ARM, Linux on ARM, musl, OpenJ9 and
   other non-HotSpot VMs, Java runtimes without a JDK layout, R versions other
   than current release (and devel in `check.yaml`), and downstream packages

@@ -4,7 +4,10 @@
 #endif
 #ifdef _WIN32
 #define _WIN32_WINNT 0x0602
+/* EnumProcessModules is K32EnumProcessModules in kernel32, without psapi.dll */
+#define PSAPI_VERSION 2
 #include <windows.h>
+#include <psapi.h>
 #else
 #include <dlfcn.h>
 #include <sys/stat.h>
@@ -14,6 +17,7 @@
 #include <link.h>
 #endif
 #endif
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -138,11 +142,119 @@ static int same_file(const wchar_t *a, const wchar_t *b) {
     if (hb != INVALID_HANDLE_VALUE) CloseHandle(hb);
     return res;
 }
+static int in_image(DWORD rva, DWORD count, DWORD width, DWORD size) {
+    return rva < size && count <= (size - rva) / width;
+}
+/* Whether a mapped module defines, rather than forwards, an export. The
+   export table is read in memory, so nothing is loaded; GetProcAddress
+   would load the target of a forwarded export. */
+static int owns_export(HMODULE module, const char *sym) {
+    const BYTE *base = (const BYTE *) module;
+    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *) base;
+    const IMAGE_NT_HEADERS *nt;
+    const IMAGE_DATA_DIRECTORY *dir;
+    const IMAGE_EXPORT_DIRECTORY *exp;
+    const DWORD *names, *functions;
+    const WORD *ordinals;
+    DWORD size, i, len = (DWORD) strlen(sym) + 1;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < (LONG) sizeof(*dos) ||
+        dos->e_lfanew > 4096 - (LONG) sizeof(*nt))
+        return 0;
+    nt = (const IMAGE_NT_HEADERS *) (base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR_MAGIC ||
+        nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXPORT)
+        return 0;
+    size = nt->OptionalHeader.SizeOfImage;
+    dir = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (!dir->VirtualAddress || dir->VirtualAddress >= size || dir->Size < sizeof(*exp) ||
+        dir->Size > size - dir->VirtualAddress)
+        return 0;
+    exp = (const IMAGE_EXPORT_DIRECTORY *) (base + dir->VirtualAddress);
+    if (!in_image(exp->AddressOfNames, exp->NumberOfNames, 4, size) ||
+        !in_image(exp->AddressOfNameOrdinals, exp->NumberOfNames, 2, size) ||
+        !in_image(exp->AddressOfFunctions, exp->NumberOfFunctions, 4, size))
+        return 0;
+    names = (const DWORD *) (base + exp->AddressOfNames);
+    ordinals = (const WORD *) (base + exp->AddressOfNameOrdinals);
+    functions = (const DWORD *) (base + exp->AddressOfFunctions);
+    /* Names are usually sorted, but a linear scan does not depend on it. */
+    for (i = 0; i < exp->NumberOfNames; i++) {
+        DWORD f;
+        if (names[i] >= size || len > size - names[i] || memcmp(base + names[i], sym, len)) continue;
+        if (ordinals[i] >= exp->NumberOfFunctions) return 0;
+        f = functions[ordinals[i]];
+        /* An address inside the export directory names a forwarded export. */
+        return f && f < size && (f < dir->VirtualAddress || f - dir->VirtualAddress >= dir->Size);
+    }
+    return 0;
+}
+static int is_jvm_name(const wchar_t *path) {
+    const wchar_t *base = wcsrchr(path, L'\\');
+    return !_wcsicmp(base ? base + 1 : path, L"jvm.dll");
+}
+/* A module is a JVM if it is named jvm.dll, even if malformed, or if it
+   defines the JNI invocation exports and a JVM_ export, whatever its name.
+   JNI exports alone do not suffice: rJava's wrappers have them too. */
+static int is_jvm_module(HMODULE module, const wchar_t *path) {
+    return (path && is_jvm_name(path)) ||
+        (owns_export(module, "JVM_CurrentTimeMillis") && owns_export(module, "JNI_CreateJavaVM") &&
+         owns_export(module, "JNI_GetCreatedJavaVMs"));
+}
+struct jvm_image { HMODULE handle; wchar_t *path; };
+/* Lists the JVM modules mapped into the process, each with a reference
+   (and path if known). Returns their number, -1 if modules cannot be listed. */
+static int find_jvms(struct jvm_image **out) {
+    HMODULE *mods = NULL;
+    struct jvm_image *v = NULL;
+    DWORD need = 0, size = 0, count, i;
+    int n = 0, tries;
+    *out = NULL;
+    for (tries = 0; tries < 4 && need >= size; tries++) {
+        HMODULE *m = realloc(mods, (size = need + 64 * sizeof(HMODULE)));
+        if (!m) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto fail; }
+        mods = m;
+        if (!K32EnumProcessModules(GetCurrentProcess(), mods, size, &need)) goto fail;
+    }
+    if (need >= size) { SetLastError(ERROR_INSUFFICIENT_BUFFER); goto fail; }
+    count = need / sizeof(HMODULE);
+    if (count && !(v = calloc(count, sizeof(*v)))) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto fail; }
+    for (i = 0; i < count; i++) {
+        HMODULE module = NULL;
+        wchar_t *path;
+        /* Hold a reference while reading the module: a module unloaded since
+           the enumeration is skipped, and cannot be replaced while read. */
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR) mods[i], &module)) continue;
+        if (module != mods[i]) { FreeLibrary(module); continue; }
+        path = module_path(module);
+        if (is_jvm_module(module, path)) {
+            v[n].handle = module;
+            v[n++].path = path;
+        } else {
+            free(path);
+            FreeLibrary(module);
+        }
+    }
+    free(mods);
+    *out = v;
+    return n;
+fail:
+    free(mods);
+    free(v);
+    return -1;
+}
+static void free_jvms(struct jvm_image *v, int n) {
+    int i;
+    for (i = 0; i < n; i++) {
+        if (v[i].handle) FreeLibrary(v[i].handle);
+        free(v[i].path);
+    }
+    free(v);
+}
 static int load_library(const char *path) {
-    wchar_t *wide = NULL, *full = NULL, *mapped_path = NULL, *bin = NULL, *slash;
-    HMODULE mapped;
+    wchar_t *wide = NULL, *full = NULL, *bin = NULL, *slash;
+    struct jvm_image *jvms = NULL;
     DLL_DIRECTORY_COOKIE cookie = NULL;
-    int res = -2;
+    int res = -2, n = 0;
     if (!(wide = to_wide(path))) {
         save_win_error("Cannot convert JVM library path to UTF-16", path, GetLastError());
         goto done;
@@ -152,20 +264,33 @@ static int load_library(const char *path) {
         goto done;
     }
     for (slash = full; *slash; slash++) if (*slash == L'/') *slash = L'\\';
-    if ((mapped = GetModuleHandleW(L"jvm.dll"))) {
-        int same = (mapped_path = module_path(mapped)) ? same_file(full, mapped_path) : -1;
-        char *name = mapped_path ? to_utf8(mapped_path) : NULL;
-        if (same == 1) {
+    if ((n = find_jvms(&jvms)) < 0) {
+        save_win_error("Cannot list the modules of", "this process", GetLastError());
+        res = -4;
+        goto done;
+    }
+    if (n) {
+        /* Two mapped JVM modules are two runtimes, even if they are one file. */
+        int same = (n == 1 && jvms[0].path) ? same_file(full, jvms[0].path) : -1;
+        char *name = jvms[0].path ? to_utf8(jvms[0].path) : NULL;
+        if (same == 1 && !is_jvm_name(jvms[0].path)) {
+            /* The JDK's DLLs import jvm.dll by name, and the loader matches
+               loaded modules by base name: starting this one would load
+               another jvm.dll or fail. */
+            snprintf(last_error, sizeof(last_error), "The JVM library %s is already mapped under another name: %s. Use a new R process.",
+                     path, name ? name : "unknown path");
+            res = -4;
+        } else if (same == 1) {
             /* Reference the mapped module itself: loading an alias of its path
-               must never map a second copy of jvm.dll. */
-            if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR) mapped, &jni_dl))
-                res = 0;
-            else {
-                jni_dl = NULL;
-                save_win_error("Cannot reference the mapped JVM library", name ? name : path, GetLastError());
-            }
+               must never map a second copy of the JVM. */
+            jni_dl = jvms[0].handle;
+            jvms[0].handle = NULL;
+            res = 0;
         } else {
-            if (same)
+            if (n > 1)
+                snprintf(last_error, sizeof(last_error), "%d JVM libraries are already mapped, including %s. Use a new R process.",
+                         n, name ? name : "unknown path");
+            else if (same)
                 snprintf(last_error, sizeof(last_error), "Cannot verify that %s is the JVM library already mapped: %s. Use a new R process.",
                          path, name ? name : "unknown path");
             else
@@ -194,27 +319,40 @@ static int load_library(const char *path) {
     else save_win_error("Cannot load JVM library", path, GetLastError());
     if (cookie) RemoveDllDirectory(cookie);
 done:
-    free(wide); free(full); free(mapped_path); free(bin);
+    if (jvms) free_jvms(jvms, n);
+    free(wide); free(full); free(bin);
     return res;
 }
 const char *djni_mapped(int *vms) {
-    HMODULE module = NULL;
-    wchar_t *path;
-    JNI_GetCreatedJavaVMs_fnptr created;
+    struct jvm_image *jvms;
+    int n;
     *vms = -1;
     free(mapped_name);
     mapped_name = NULL;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, L"jvm.dll", &module))
+    if ((n = find_jvms(&jvms)) < 0) {
+        save_win_error("Cannot list the modules of", "this process", GetLastError());
+        *vms = -2;
         return NULL;
-    if ((created = (JNI_GetCreatedJavaVMs_fnptr) GetProcAddress(module, "JNI_GetCreatedJavaVMs"))) {
+    }
+    if (!n) {
+        free(jvms);
+        return NULL;
+    }
+    /* With several JVM modules, the VM count of one is not the answer. */
+    if (n == 1 && owns_export(jvms[0].handle, "JNI_GetCreatedJavaVMs")) {
+        JNI_GetCreatedJavaVMs_fnptr created =
+            (JNI_GetCreatedJavaVMs_fnptr) GetProcAddress(jvms[0].handle, "JNI_GetCreatedJavaVMs");
         JavaVM *vm;
-        jsize n = 0;
-        if (created(&vm, 1, &n) == JNI_OK) *vms = (int) n;
+        jsize count = 0;
+        if (created && created(&vm, 1, &count) == JNI_OK) *vms = (int) count;
     }
-    if ((path = module_path(module))) {
-        mapped_name = to_utf8(path);
-        free(path);
+    mapped_name = jvms[0].path ? to_utf8(jvms[0].path) : NULL;
+    if (!mapped_name) mapped_name = strdup("(unknown path)");
+    if (!mapped_name) {
+        snprintf(last_error, sizeof(last_error), "Cannot report the mapped JVM library: out of memory");
+        *vms = -2;
     }
+    free_jvms(jvms, n);
     return mapped_name;
 }
 #else
@@ -223,94 +361,216 @@ static int same_file(const char *a, const char *b) {
     if (stat(a, &sa) || stat(b, &sb)) return -1;
     return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
 }
-static int is_jvm_image(const char *name) {
+static int is_jvm_name(const char *name) {
     const char *base = strrchr(name, '/');
     base = base ? base + 1 : name;
     return !strcmp(base, "libjvm.dylib") || !strcmp(base, "libjvm.so");
 }
-typedef int (*image_fn)(const char *name, void *data);
+/* An image mapped into the process: its name as the dynamic loader records
+   it, and where it is mapped, to tell its own definitions from those of its
+   dependencies. */
+struct image {
+    char *name;
+#ifdef __APPLE__
+    const void *header;
+#else
+    size_t nseg;
+    uintptr_t *seg; /* start and end of each PT_LOAD segment */
+#endif
+};
+struct images { struct image *v; size_t n, size; int failed; };
+static struct image *add_image(struct images *l, const char *name) {
+    struct image *im;
+    if (l->n == l->size) {
+        size_t size = l->size ? 2 * l->size : 64;
+        struct image *v = realloc(l->v, size * sizeof(*v));
+        if (!v) { l->failed = 1; return NULL; }
+        l->v = v;
+        l->size = size;
+    }
+    im = &l->v[l->n];
+    memset(im, 0, sizeof(*im));
+    if (!(im->name = strdup(name))) { l->failed = 1; return NULL; }
+    l->n++;
+    return im;
+}
 #ifdef __linux__
-struct phdr_data { image_fn fn; void *data; };
+/* Only records images: dlopen() must not be called from this callback. */
 static int phdr_image(struct dl_phdr_info *info, size_t size, void *data) {
-    struct phdr_data *d = (struct phdr_data *) data;
-    return info->dlpi_name ? d->fn(info->dlpi_name, d->data) : 0;
+    struct images *l = (struct images *) data;
+    struct image *im;
+    size_t i, n = 0;
+    if (!info->dlpi_name || !*info->dlpi_name) return 0; /* the executable */
+    if (!(im = add_image(l, info->dlpi_name))) return 1;
+    for (i = 0; i < info->dlpi_phnum; i++) if (info->dlpi_phdr[i].p_type == PT_LOAD) n++;
+    if (n && !(im->seg = malloc(2 * n * sizeof(uintptr_t)))) { l->failed = 1; return 1; }
+    for (i = 0; i < info->dlpi_phnum; i++)
+        if (info->dlpi_phdr[i].p_type == PT_LOAD) {
+            uintptr_t start = (uintptr_t) info->dlpi_addr + (uintptr_t) info->dlpi_phdr[i].p_vaddr;
+            im->seg[2 * im->nseg] = start;
+            im->seg[2 * im->nseg++ + 1] = start + (uintptr_t) info->dlpi_phdr[i].p_memsz;
+        }
+    return 0;
 }
 #endif
-/* Calls fn for each image mapped into the process until it returns nonzero. */
-static int each_image(image_fn fn, void *data) {
+static void free_images(struct images *l) {
+    size_t i;
+    for (i = 0; i < l->n; i++) {
+        free(l->v[i].name);
+#ifndef __APPLE__
+        free(l->v[i].seg);
+#endif
+    }
+    free(l->v);
+}
+/* Returns 0, or -1 if the images cannot be listed. Other systems list none. */
+static int list_images(struct images *l) {
 #ifdef __APPLE__
     uint32_t i, n = _dyld_image_count();
     for (i = 0; i < n; i++) {
         const char *name = _dyld_get_image_name(i);
-        if (name && fn(name, data)) return 1;
+        const struct mach_header *header = _dyld_get_image_header(i);
+        struct image *im;
+        if (!name || !header) continue;
+        if (!(im = add_image(l, name))) break;
+        im->header = header;
     }
-    return 0;
 #elif defined(__linux__)
-    struct phdr_data d = { fn, data };
-    return dl_iterate_phdr(phdr_image, &d);
-#else
-    return 0;
+    dl_iterate_phdr(phdr_image, l);
 #endif
+    return l->failed ? -1 : 0;
 }
-struct jvm_match { const char *requested; char *mapped; };
-/* Device and inode identify the file across symbolic links, hard links and
-   equivalent spellings; a requested file that cannot be found differs. */
-static int check_mapped(const char *name, void *data) {
-    struct jvm_match *m = (struct jvm_match *) data;
-    if (!is_jvm_image(name)) return 0;
-    if (same_file(name, m->requested) == 1) {
-        if (!m->mapped) m->mapped = strdup(name);
+#ifdef RTLD_NOLOAD
+/* Whether the image defines sym itself: dlsym() on its handle also finds
+   definitions it inherits from the libraries it depends on. */
+static int owns(void *handle, const struct image *im, const char *sym) {
+    void *p = dlsym(handle, sym);
+    if (!p) return 0;
+#ifdef __APPLE__
+    {
+        Dl_info info;
+        return dladdr(p, &info) && info.dli_fbase == im->header;
+    }
+#else
+    {
+        uintptr_t a = (uintptr_t) p;
+        size_t i;
+        for (i = 0; i < im->nseg; i++)
+            if (a >= im->seg[2 * i] && a < im->seg[2 * i + 1]) return 1;
         return 0;
     }
-    snprintf(last_error, sizeof(last_error), "Another JVM library is already mapped: %s. Use a new R process.", name);
-    return 1;
+#endif
 }
-static int find_jvm(const char *name, void *data) {
-    if (!is_jvm_image(name)) return 0;
-    *(char **) data = strdup(name);
-    return 1;
+#endif
+struct jvm_image { char *name; void *handle; int owns_created; };
+/* Lists the JVM images mapped into the process, each with a reference if
+   one can be taken without loading anything. An image is a JVM if it has a
+   JVM library name, even if malformed, or if it defines the JNI invocation
+   exports and a JVM_ export, whatever its name. JNI exports alone do not
+   suffice: the macOS libjli defines them to forward to libjvm. Returns the
+   number of JVM images, or -1 if the images cannot be listed. */
+static int find_jvms(struct jvm_image **out) {
+    struct images l = { NULL, 0, 0, 0 };
+    struct jvm_image *v = NULL;
+    size_t i;
+    int n = 0;
+    *out = NULL;
+    if (list_images(&l) || (l.n && !(v = calloc(l.n, sizeof(*v))))) {
+        free_images(&l);
+        return -1;
+    }
+    for (i = 0; i < l.n; i++) {
+        void *handle = NULL;
+        int jvm = is_jvm_name(l.v[i].name);
+#ifdef RTLD_NOLOAD
+        /* RTLD_NOLOAD returns a reference only if the image is already mapped,
+           and RTLD_LAZY leaves the relocation of other images unchanged. */
+        handle = dlopen(l.v[i].name, RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
+        if (handle && !jvm)
+            jvm = owns(handle, &l.v[i], "JVM_CurrentTimeMillis") && owns(handle, &l.v[i], "JNI_CreateJavaVM") &&
+                owns(handle, &l.v[i], "JNI_GetCreatedJavaVMs");
+        if (jvm) v[n].owns_created = handle && owns(handle, &l.v[i], "JNI_GetCreatedJavaVMs");
+#endif
+        if (jvm) {
+            v[n].name = l.v[i].name;
+            l.v[i].name = NULL;
+            v[n++].handle = handle;
+        } else if (handle)
+            dlclose(handle);
+    }
+    dlerror(); /* failed lookups are not errors of the caller */
+    free_images(&l);
+    *out = v;
+    return n;
 }
+static void free_jvms(struct jvm_image *v, int n) {
+    int i;
+    for (i = 0; i < n; i++) {
+        if (v[i].handle) dlclose(v[i].handle);
+        free(v[i].name);
+    }
+    free(v);
+}
+/* Device and inode identify the file across symbolic links, hard links and
+   equivalent spellings; a requested file that cannot be found differs. */
 static int load_library(const char *path) {
-    struct jvm_match m = { path, NULL };
-    if (each_image(check_mapped, &m)) {
-        free(m.mapped);
+    struct jvm_image *jvms;
+    int n = find_jvms(&jvms), res = 0;
+    if (n < 0) {
+        snprintf(last_error, sizeof(last_error), "Cannot list the libraries mapped into this process. Use a new R process.");
         return -4;
     }
-    /* Open a mapped JVM by its own name, so an alias cannot map another copy. */
-    jni_dl = dlopen(m.mapped ? m.mapped : path, RTLD_LOCAL | RTLD_NOW);
-    free(m.mapped);
-    if (!jni_dl) {
+    if (n > 1) {
+        snprintf(last_error, sizeof(last_error), "%d JVM libraries are already mapped, including %s. Use a new R process.",
+                 n, jvms[0].name);
+        res = -4;
+    } else if (n == 1) {
+        if (same_file(jvms[0].name, path) != 1) {
+            snprintf(last_error, sizeof(last_error), "Another JVM library is already mapped: %s. Use a new R process.", jvms[0].name);
+            res = -4;
+        } else if (!jvms[0].handle) {
+            snprintf(last_error, sizeof(last_error), "Cannot reference the JVM library already mapped: %s. Use a new R process.", jvms[0].name);
+            res = -4;
+        } else {
+            /* Reference the mapped image itself, so an alias cannot map another copy. */
+            jni_dl = jvms[0].handle;
+            jvms[0].handle = NULL;
+        }
+    } else if (!(jni_dl = dlopen(path, RTLD_LOCAL | RTLD_NOW))) {
         const char *error = dlerror();
         snprintf(last_error, sizeof(last_error), "%s", error ? error : "dynamic loader error");
-        return -2;
+        res = -2;
     }
-    return 0;
+    free_jvms(jvms, n);
+    return res;
 }
 const char *djni_mapped(int *vms) {
-    char *found = NULL;
+    struct jvm_image *jvms;
+    int n;
     *vms = -1;
     free(mapped_name);
     mapped_name = NULL;
-    each_image(find_jvm, &found);
-    if (!found) return NULL;
-#ifdef RTLD_NOLOAD
-    {
-        /* RTLD_NOLOAD returns a reference only if the image is already mapped. */
-        void *handle = dlopen(found, RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
-        if (handle) {
-            JNI_GetCreatedJavaVMs_fnptr created;
-            *(void **) &created = dlsym(handle, "JNI_GetCreatedJavaVMs");
-            if (created) {
-                JavaVM *vm;
-                jsize n = 0;
-                if (created(&vm, 1, &n) == JNI_OK) *vms = (int) n;
-            }
-            dlclose(handle);
+    if ((n = find_jvms(&jvms)) < 0) {
+        snprintf(last_error, sizeof(last_error), "Cannot list the libraries mapped into this process");
+        *vms = -2;
+        return NULL;
+    }
+    /* With several JVM images, the VM count of one is not the answer. */
+    if (n == 1 && jvms[0].owns_created) {
+        JNI_GetCreatedJavaVMs_fnptr created;
+        *(void **) &created = dlsym(jvms[0].handle, "JNI_GetCreatedJavaVMs");
+        if (created) {
+            JavaVM *vm;
+            jsize count = 0;
+            if (created(&vm, 1, &count) == JNI_OK) *vms = (int) count;
         }
     }
-#endif
-    mapped_name = found;
-    return found;
+    if (n) {
+        mapped_name = jvms[0].name;
+        jvms[0].name = NULL;
+    }
+    free_jvms(jvms, n);
+    return mapped_name;
 }
 #endif
 

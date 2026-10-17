@@ -23,8 +23,10 @@ options(java.parameters = "-Djava.awt.headless=true")
 ns <- loadNamespace("rJava")
 internal <- function(name) get(name, ns)
 state <- function() internal(".jvmState")()
+mapped_jvm <- function() .Call(internal("RgetMappedJVM"))
+# rJava's own JNI wrappers (exported by rJava.dll) must not count as a JVM.
 stopifnot(identical(state()$state, "not-loaded"), !state()$initialized,
-          identical(minimal_path, Sys.getenv("PATH")))
+          identical(minimal_path, Sys.getenv("PATH")), is.null(mapped_jvm()))
 
 lib <- function(home) {
   paths <- internal(".find.jvm.library")(home)
@@ -48,12 +50,32 @@ fails <- function(expr, pattern = NULL) {
   log("rejected:", substr(gsub("\\s+", " ", result), 1L, 240L))
 }
 # Map a JVM library as other native code in the process would, outside rJava.
-preload <- function(path, local = TRUE) {
+preload <- function(path, local = TRUE, bin = dirname(dirname(path))) {
   old <- Sys.getenv("PATH")
   # JDK 8 jvm.dll needs the C runtime from its bin directory.
-  if (windows) Sys.setenv(PATH = paste(normalizePath(dirname(dirname(path)), winslash = "\\"), old, sep = ";"))
+  if (windows) Sys.setenv(PATH = paste(normalizePath(bin, winslash = "\\"), old, sep = ";"))
   dyn.load(path, local = local, now = TRUE)
   Sys.setenv(PATH = old)
+}
+# Another name for the JVM library of a home, with a basename no JVM uses:
+# a hard link in its own directory, from which the JVM still finds its home.
+# A mapped DLL cannot be deleted, so Windows removes earlier links first.
+alias_lib <- function(home) {
+  real <- lib(home)
+  unlink(Sys.glob(file.path(dirname(real), "rjava-alias-*")))
+  alias <- file.path(dirname(real), paste0("rjava-alias-", Sys.getpid(), ".", tools::file_ext(real)))
+  stopifnot(file.link(real, alias))
+  reg.finalizer(globalenv(), function(e) unlink(alias), onexit = TRUE)
+  alias
+}
+# The library must be recognized by its exports, not by its name.
+expect_mapped <- function(path, vms) {
+  mapped <- mapped_jvm()
+  if (is.null(mapped)) stop("no mapped JVM library was found; expected ", path)
+  log("mapped", mapped$path, "with", mapped$vms, "VMs")
+  stopifnot(identical(mapped$vms, vms))
+  if (!is.null(path) && !identical(basename(mapped$path), basename(path)))
+    stop("mapped library is ", mapped$path, ", expected ", path)
 }
 # A directory name with spaces and non-ASCII characters when the locale allows it.
 odd_dir <- function() {
@@ -201,6 +223,59 @@ switch(scenario,
     stopifnot(state()$state == "none")
     start(home_a)
   },
+  renamed = {
+    # A JVM library mapped under a name no JVM uses, by a copy, hard link or
+    # symbolic link, rejects another runtime; the same file is still accepted.
+    if (variant == "copy") {
+      # A copy of B is another file than B's own library, and than A's.
+      copy <- file.path(odd_dir(), paste0("renamed runtime.", tools::file_ext(lib(home_b))))
+      stopifnot(file.copy(lib(home_b), copy, overwrite = TRUE))
+      preload(copy, bin = dirname(dirname(lib(home_b))))
+      expect_mapped(copy, 0L)
+      Sys.setenv(JAVA_HOME = home_a)
+      fails(rJava::.jinit(), "already mapped")
+      fails(internal(".jloadJVM")(lib(home_b)), "already mapped")
+      expect_mapped(copy, 0L)
+    } else {
+      path <- switch(variant,
+        hardlink = alias_lib(home_a),
+        symlink = {
+          stopifnot(!windows)
+          link <- file.path(odd_dir(), paste0("renamed link.", tools::file_ext(lib(home_a))))
+          unlink(link)
+          stopifnot(file.symlink(lib(home_a), link))
+          link
+        },
+        stop("unknown renamed variant"))
+      log("renamed", path, "of", lib(home_a))
+      preload(path, bin = dirname(dirname(lib(home_a))))
+      # dyld may record a symbolic link by its target, so only a hard link
+      # is certain to be mapped under the unusual name.
+      expect_mapped(if (variant == "hardlink") path, 0L)
+      Sys.setenv(JAVA_HOME = home_b)
+      fails(rJava::.jinit(), "already mapped")
+      fails(internal(".jloadJVM")(lib(home_b)), "already mapped")
+      Sys.setenv(JAVA_HOME = home_a)
+      if (windows) {
+        # The JDK's DLLs import jvm.dll by name, which this module lacks.
+        fails(rJava::.jinit(), "under another name")
+      } else {
+        start(home_a)
+        expect_mapped(if (variant == "hardlink") path, 1L)
+      }
+    }
+  },
+  decoy = {
+    # The Java launcher library (jli) has JNI exports on macOS that forward to
+    # libjvm, but is no JVM: it must neither be reported nor block selection.
+    jli <- list.files(home_a, "^(lib)?jli[.](so|dylib|dll)$", recursive = TRUE, full.names = TRUE)
+    stopifnot(length(jli) >= 1L)
+    log("decoy", jli[1])
+    preload(jli[1], bin = dirname(jli[1]))
+    stopifnot(is.null(mapped_jvm()))
+    Sys.setenv(JAVA_HOME = home_b)
+    start(home_b)
+  },
   nonascii = {
     # No preload: the loader itself must open a path with spaces and non-ASCII names.
     Sys.setenv(JAVA_HOME = link_home(home_b))
@@ -243,12 +318,17 @@ switch(scenario,
     boot <- file.path(system.file("java", package = "rJava"), "boot")
     old <- Sys.getenv("PATH")
     if (windows) Sys.setenv(PATH = paste(normalizePath(dirname(dirname(lib(home_a))), winslash = "\\"), old, sep = ";"))
-    created <- .C("rjava_test_create_jvm", lib(home_a), paste0("-Djava.class.path=", boot), result = 0L)$result
+    # Variant renamed: the host loads the runtime under a name no JVM uses.
+    # Not on Windows, where the JDK's DLLs then cannot import jvm.dll by name.
+    stopifnot(variant %in% c("", "renamed"), !(windows && variant == "renamed"))
+    path <- if (variant == "renamed") alias_lib(home_a) else lib(home_a)
+    created <- .C("rjava_test_create_jvm", path, paste0("-Djava.class.path=", boot), result = 0L)$result
     Sys.setenv(PATH = old)
     stopifnot(created == 0L)
-    mapped <- .Call(internal("RgetMappedJVM"))
-    stopifnot(!is.null(mapped), identical(mapped$vms, 1L), state()$state == "not-loaded")
+    expect_mapped(path, 1L)
+    stopifnot(state()$state == "not-loaded")
     Sys.setenv(JAVA_HOME = home_b)
+    fails(internal(".jloadJVM")(lib(home_b)), "already mapped")
     start(home_a)
     stopifnot(state()$state == "attached")
   },

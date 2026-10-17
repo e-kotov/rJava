@@ -1175,7 +1175,12 @@ REPC SEXP RgetMappedJVM(void) {
     int vms;
     const char *path = djni_mapped(&vms);
     SEXP res, names;
-    if (!path) return R_NilValue;
+    if (!path) {
+        if (vms == -2)
+            Rf_error("Cannot determine whether a JVM library is mapped: %s",
+                     djni_last_error() ? djni_last_error() : "unknown error");
+        return R_NilValue;
+    }
     res = PROTECT(Rf_allocVector(VECSXP, 2));
     names = PROTECT(Rf_allocVector(STRSXP, 2));
 #ifdef _WIN32

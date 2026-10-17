@@ -57,6 +57,16 @@ jobs:
           for home in "$JAVA_A" "$JAVA_B"; do
             echo "== $home"; "$home/bin/java" -version 2>&1
             find "$home" \( -name 'libjvm.*' -o -name jvm.dll \) -print
+            # djni recognizes a JVM library under any name by these exports.
+            lib="$(find "$home" \( -name 'libjvm.*' -o -name jvm.dll \) -path '*server*' -print -quit)"
+            case "$RUNNER_OS" in
+              Linux) syms="$(nm -D --defined-only "$lib")" ;;
+              macOS) syms="$(nm -gU "$lib")" ;;
+              Windows) syms="$(objdump -p "$lib" | tr -d '\r')" ;;
+            esac
+            for sym in JNI_CreateJavaVM JNI_GetCreatedJavaVMs JVM_CurrentTimeMillis; do
+              if grep -Eq "[ _]$sym(@|\$| )" <<< "$syms"; then echo "exports $sym"; else echo "::error::$lib does not export $sym"; exit 1; fi
+            done
           done
           echo "RJE_JAVA_HOME_A=$JAVA_A" >> "$GITHUB_ENV"
           echo "RJE_JAVA_HOME_B=$JAVA_B" >> "$GITHUB_ENV"
@@ -132,6 +142,18 @@ jobs:
           run alias link
           run alias spelling
           if [[ "$RUNNER_OS" == Windows ]]; then run alias short; fi
+          # JVM libraries mapped under names no JVM uses, and a non-JVM library with JNI exports.
+          run renamed copy
+          run renamed hardlink
+          # A renamed jvm.dll cannot start a VM: JDK DLLs import jvm.dll by name.
+          if [[ "$RUNNER_OS" != Windows ]]; then run renamed symlink; run hosted renamed; fi
+          run decoy
+      - name: Remove hard links left in the JDK directories
+        if: always()
+        shell: bash
+        run: |
+          # A mapped DLL cannot be deleted, so Windows leaves them behind until here.
+          find "$RJE_JAVA_HOME_A" "$RJE_JAVA_HOME_B" -name 'rjava-alias-*' -print -delete
       - name: Embed R in a Java host through JRI
         if: runner.os != 'Windows'
         shell: bash
@@ -188,7 +210,7 @@ jobs:
         if: matrix.downstream
         with:
           repository: e-kotov/rJavaEnv
-          ref: 9dd898e6a6d910ecae246c0771b7d5eb270031c4
+          ref: 693b87c67f8c521388c3fd8627c8afbc29d8766a
           path: downstream-source
       - uses: r-lib/actions/setup-r-dependencies@v2
         if: matrix.downstream
