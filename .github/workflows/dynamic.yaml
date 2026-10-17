@@ -5,11 +5,23 @@ on:
   workflow_dispatch:
 jobs:
   dynamic:
+    # Three runtime pairs per platform instead of every OS x vendor x version:
+    # legacy layouts (JDK 8/11), current LTS (17/21, with downstream packages),
+    # and other vendors spanning 11 to 25. The build JDK is always Temurin 17.
+    name: ${{ matrix.os }} ${{ matrix.set }} (${{ matrix.a-dist }} ${{ matrix.a-version }}, ${{ matrix.b-dist }} ${{ matrix.b-version }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        set: [legacy, current, vendor]
+        include:
+          - { set: legacy, a-dist: temurin, a-version: '8', b-dist: temurin, b-version: '11' }
+          # Temurin has no JDK 8 for macOS on arm64.
+          - { set: legacy, os: macos-latest, a-dist: zulu }
+          - { set: current, a-dist: temurin, a-version: '17', b-dist: temurin, b-version: '21', downstream: true }
+          - { set: vendor, a-dist: corretto, a-version: '11', b-dist: zulu, b-version: '25' }
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     env:
       NOAWT: '1'
     steps:
@@ -21,19 +33,53 @@ jobs:
           r-version: release
           rtools-version: '45'
       - uses: actions/setup-java@v5
-        id: java17
+        id: java-a
+        with:
+          distribution: ${{ matrix.a-dist }}
+          java-version: ${{ matrix.a-version }}
+      - uses: actions/setup-java@v5
+        id: java-b
+        with:
+          distribution: ${{ matrix.b-dist }}
+          java-version: ${{ matrix.b-version }}
+      - uses: actions/setup-java@v5
+        id: java-build
         with:
           distribution: temurin
           java-version: '17'
-      - uses: actions/setup-java@v5
-        id: java21
-        with:
-          distribution: temurin
-          java-version: '21'
+      - name: Record runtimes
+        shell: bash
+        env:
+          JAVA_A: ${{ steps.java-a.outputs.path }}
+          JAVA_B: ${{ steps.java-b.outputs.path }}
+        run: |
+          set -euo pipefail
+          for home in "$JAVA_A" "$JAVA_B"; do
+            echo "== $home"; "$home/bin/java" -version 2>&1
+            find "$home" \( -name 'libjvm.*' -o -name jvm.dll \) -print
+          done
+          echo "RJE_JAVA_HOME_A=$JAVA_A" >> "$GITHUB_ENV"
+          echo "RJE_JAVA_HOME_B=$JAVA_B" >> "$GITHUB_ENV"
+          echo "RJE_FALLBACK_HOME=$JAVA_B" >> "$GITHUB_ENV"
+      - name: Prepare Windows discovery and path fixtures
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Generate 8.3 names for directories created from now on.
+          fsutil 8dot3name set C: 0
+          # Machine-wide JavaSoft keys would take precedence over this user key.
+          reg query 'HKLM\Software\JavaSoft' /s 2>$null
+          if ($LASTEXITCODE -eq 0) { Write-Output 'HKLM JavaSoft keys are present' } else { Write-Output 'No HKLM JavaSoft keys' }
+          reg add 'HKCU\Software\JavaSoft\JDK' /v CurrentVersion /d rjava-test /f
+          reg add 'HKCU\Software\JavaSoft\JDK\rjava-test' /v JavaHome /d "$env:RJE_JAVA_HOME_B" /f
       - name: Configure build Java
         if: runner.os != 'Windows'
         shell: bash
-        run: sudo R CMD javareconf
+        run: |
+          echo "export PATH=$PATH" > reconf.sh
+          echo "export JAVA_HOME=$JAVA_HOME" >> reconf.sh
+          echo "R CMD javareconf" >> reconf.sh
+          sudo bash reconf.sh
       - name: Generate distribution and install in isolated library
         shell: bash
         run: |
@@ -44,16 +90,6 @@ jobs:
           R CMD INSTALL --library="$RUNNER_TEMP/rjava-lib" "$archive"
           cp "$archive" "$RUNNER_TEMP/"
           echo "R_LIBS=$RUNNER_TEMP/rjava-lib" >> "$GITHUB_ENV"
-      - name: Check deferred loading in fresh processes
-        shell: bash
-        env:
-          RJE_JAVA_HOME_A: ${{ steps.java17.outputs.path }}
-          RJE_JAVA_HOME_B: ${{ steps.java21.outputs.path }}
-        run: |
-          set -euo pipefail
-          for scenario in select retry unload preloaded; do
-            Rscript --vanilla tests-integration/deferred.R "$scenario"
-          done
       - name: Inspect native JVM linkage
         shell: bash
         run: |
@@ -68,28 +104,63 @@ jobs:
           fi
           cat "$RUNNER_TEMP/linkage.txt"
           if grep -Ei '(libjvm|DLL Name: jvm.dll)' "$RUNNER_TEMP/linkage.txt"; then exit 1; fi
+      - name: Compare src/jni.h with the JDK headers
+        shell: bash
+        run: Rscript --vanilla tests-integration/jni-abi.R "$RJE_JAVA_HOME_A" "$RJE_JAVA_HOME_B"
+      - name: Check deferred loading in fresh processes
+        shell: bash
+        run: |
+          set -euo pipefail
+          run() { echo "::group::$*"; Rscript --vanilla tests-integration/deferred.R "$@"; echo "::endgroup::"; }
+          for scenario in select retry badinput unload preloaded nonascii fallback laterload jengine; do
+            run "$scenario"
+          done
+          run alias link
+          run alias spelling
+          if [[ "$RUNNER_OS" == Windows ]]; then run alias short; fi
+      - name: Embed R in a Java host through JRI
+        shell: bash
+        timeout-minutes: 5
+        run: Rscript --vanilla tests-integration/jri.R
+      - name: Check Windows DLL search state after loads
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/dll-search"
+          server="$(dirname "$(Rscript --vanilla -e 'cat(rJava:::.find.jvm.library(Sys.getenv("RJE_JAVA_HOME_A"))[1])')")"
+          mkdir -p "$work/missing/bin/server" "$work/copy/bin/server"
+          cp "$server/jvm.dll" "$work/copy/bin/server/"
+          cp "$(dirname "$server")"/*.dll "$work/copy/bin/"
+          marker="$(dirname "$server")/java.dll"
+          cp "$marker" "$work/missing/bin/rjava_marker.dll"
+          cp "$marker" "$work/copy/bin/rjava_marker.dll"
+          gcc -Isrc -o "$work/dll-search.exe" tests-integration/dll-search.c
+          w() { cygpath -w "$1"; }
+          PATH="/c/Windows/System32:/c/Windows" "$work/dll-search.exe" \
+            "$(w "$work/missing/bin/server/jvm.dll")" "$(w "$work/copy/bin/server/jvm.dll")" "$(w "$work/missing/bin")"
       - uses: actions/checkout@v4
+        if: matrix.downstream
         with:
           repository: e-kotov/rJavaEnv
           ref: 9dd898e6a6d910ecae246c0771b7d5eb270031c4
           path: downstream-source
       - uses: r-lib/actions/setup-r-dependencies@v2
+        if: matrix.downstream
         with:
           working-directory: downstream-source
           dependencies: '"hard"'
           extra-packages: any::callr
           install-quarto: false
       - name: Test installed rJavaEnv and downstream packages with dynamic rJava
+        if: matrix.downstream
         working-directory: downstream-source
         shell: Rscript {0}
-        env:
-          RJE_JAVA_HOME_A: ${{ steps.java17.outputs.path }}
-          RJE_JAVA_HOME_B: ${{ steps.java21.outputs.path }}
         run: source("tools/test-downstream.R")
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: dynamic-${{ matrix.os }}
+          name: dynamic-${{ matrix.os }}-${{ matrix.set }}
           path: |
             ${{ runner.temp }}/rJava_*.tar.gz
             ${{ runner.temp }}/linkage.txt
