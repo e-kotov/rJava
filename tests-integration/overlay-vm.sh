@@ -33,10 +33,11 @@ sudo qemu-system-x86_64 -accel kvm -cpu host -smp 2 -m 3072 \
   -drive "file=$work/seed.img,if=virtio,format=raw" \
   -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net-pci,netdev=net0 \
   -display none -serial "file:$work/serial.log" -daemonize -pidfile "$work/qemu.pid"
+sudo chmod a+r "$work/qemu.pid" "$work/serial.log"
 trap 'sudo kill "$(cat "$work/qemu.pid")" || true' EXIT
 ssh_opts=(-i "$work/key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5)
 ready=false
-for attempt in {1..60}; do
+for _attempt in {1..60}; do
   if ssh "${ssh_opts[@]}" -p 2222 ubuntu@127.0.0.1 true 2>/dev/null; then ready=true; break; fi
   sleep 5
 done
@@ -49,7 +50,7 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 cloud-init status --wait
 apt-get update -qq
-apt-get install -y --no-install-recommends r-base-dev openjdk-17-jdk-headless make g++ unzip zip
+apt-get install -y --no-install-recommends r-base-dev openjdk-17-jdk-headless libtirpc-dev libicu-dev make g++ unzip zip
 mkdir /home/ubuntu/source
 cd /home/ubuntu/source
 tar -xzf ../source.tar.gz

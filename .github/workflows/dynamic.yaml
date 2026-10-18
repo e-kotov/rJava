@@ -206,9 +206,9 @@ jobs:
             Write-Output "Hidden: $hidden"
             Rscript --vanilla tests-integration/deferred.R select
             if ($LASTEXITCODE -ne 0) { throw 'JVM startup failed without system VC++ runtime' }
-            Rscript --vanilla tests-integration/deferred.R laterload
+            Rscript --vanilla tests-integration/msvc.R laterload
             if ($LASTEXITCODE -ne 0) { throw 'Late native loads failed for JDK A' }
-            Rscript --vanilla tests-integration/deferred.R laterload b
+            Rscript --vanilla tests-integration/msvc.R laterload b
             if ($LASTEXITCODE -ne 0) { throw 'Late native loads failed for JDK B' }
           } finally {
             foreach ($p in $hidden) { Rename-Item "$p.rjava-hidden" (Split-Path $p -Leaf) }
