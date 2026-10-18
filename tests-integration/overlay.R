@@ -41,7 +41,7 @@ if (scenario == "fresh") {
     stopifnot(unlink(path) == 0L, file.copy(lib(b), path))
     reject(path, "already mapped")
   } else {
-    if (expect == "legacy") reject(lib(a), "overlayfs before Linux 6.8") else {
+    if (expect == "legacy") reject(lib(a), "overlayfs mapping identity cannot be verified") else {
       stopifnot(isTRUE(rJava::.jloadJVM(lib(a))))
     }
     if (scenario == "hosted") {

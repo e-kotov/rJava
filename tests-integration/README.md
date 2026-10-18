@@ -107,32 +107,53 @@ that `LoadLibraryExW` call, then removes it after success or failure. `PATH`
 is never changed. `dll-search.c` checks the removal with a positive control.
 
 Later native loads by the JVM (`zip`, `net`, `nio`, `management`,
-`sunmscapi`, `awt`, `fontmanager`, `freetype`) work with `PATH` reduced to
-system and R directories, for both JDKs of every Windows job. JDK libraries
-that import each other resolve as already-loaded modules. The logged module
-lists show the one external later dependency: `awt.dll` (and on JDK 8 also
-`sunmscapi.dll`) imports the VC++ runtime (`MSVCP140.dll`, and
-`VCRUNTIME140_1.dll` on JDK 8), which Windows then looks for in System32 and
-on `PATH`, not in the JDK. Upstream rJava has the same exposure, because it
-restores `PATH` right after linking `jvm.dll`.
+`sunmscapi`, `awt`, `fontmanager`, `freetype`) also need the JDK's MSVC runtime
+DLLs to be resolvable by basename. After verifying the JNI entry points,
+djni retains `vcruntime140.dll`, `vcruntime140_1.dll` and `msvcp140.dll` when
+available: an already loaded runtime is used first, then System32, then the
+copy bundled in the selected JDK's `bin`. No persistent search directory or
+`PATH` change is made. These references last until process exit, like the
+selected JVM itself. This can bind later imports in other native components
+to that runtime too; an already loaded or system copy is never replaced.
+JDKs that omit a required runtime still need the appropriate redistributable.
 
-The Windows job therefore hides System32's VC++ runtime DLLs, as on a
-machine without the VC++ redistributable (for example with a JDK unpacked
-from a zip archive and not on `PATH`). JVM startup must still succeed, and
-does for all six JDKs: the scoped `bin` search covers `jvm.dll` and its
-startup libraries. The later loads then fail, as recorded in the log, with
-"Can't find dependent libraries": `sunmscapi.dll` on Temurin 8, and
-`awt.dll` on Temurin 11, 17 and 21, Corretto 11 and Zulu 25. This branch
-does not change that.
+The Windows jobs hide all three System32 runtime DLLs, run JVM startup and
+all later native loads for both JDKs, and fail on any error. `msvc.R` also
+checks the loaded module paths: the runtimes must come from the selected
+JDK, so another installed copy cannot silently mask a missing dependency.
+The workflow restores the hidden DLLs in a `finally` block, including on a
+failed test.
 
-Options for maintainers, **not implemented**: (1) append the JDK `bin`
-directory to `PATH` after selection, as an installer that adds Java to
-`PATH` effectively does; this persists for the process and its children.
-(2) After loading `jvm.dll`, load the VC++ runtime DLLs bundled in the JDK
-`bin` only if System32 has none; the process then binds every later import
-of those names to the JDK's copies, possibly older than a copy another
-component bundles. Both are permanent process-wide changes that upstream
-never made.
+## Windows JRI builds
+
+`configure.win` now builds JRI at its current location, `src/jri`, and
+installs `JRI.jar` and `jri.dll` alongside rJava. The Windows Makefiles set
+explicit default targets so R's included Makeconf cannot select an unrelated
+rule. Windows uses its own console declaration instead of the Unix-only
+`Rinterface.h`; the x64 build also enables JRI's existing Win64 branches.
+
+Every Windows runtime pair now runs `.jengine()` from R and a Java host
+embedding R through JRI. The latter runs with both JDKs as host, with
+`JAVA_HOME` deliberately naming the other runtime. The test requires rJava
+to reject that other runtime and attach to the host's already running JVM.
+
+## Overlayfs kernel checks
+
+`overlay.yaml` boots real QEMU/KVM guests; a container alone would reuse the
+runner's kernel. Each guest records its actual kernel, mount, mapping device
+and inode, and the inode returned by `stat()`. Tests cover a fresh JVM,
+a preloaded JVM library, a host-created JVM and replacement of a mapped
+library through overlayfs. Each case runs in a fresh R process.
+
+The matrix includes Ubuntu 22.04's current 5.15 kernel, Ubuntu 24.04's
+current kernel (at least 6.8), and the frozen Ubuntu mainline 6.1.0 build
+`6.1.0-060100.202303090726` (packages pinned by SHA256). A current distro
+kernel can carry fixes, so a release number below 6.8 alone does not predict
+its behavior. The distro 5.15 and current-kernel jobs require same-file
+reuse to succeed. The frozen mainline job requires the ambiguous overlay
+identity to be rejected with the explicit diagnostic. Fresh selection and
+attachment to a host-created VM must work on all three. Selecting a
+different or replaced library must always fail.
 
 ## Tests
 
@@ -159,8 +180,10 @@ distribution with `sh mkdist`, installs it in an isolated library, and runs:
 | `laterload` | the later native loads above |
 | `hosted`, `hosted explicit` | native code creates a JVM, then `.jinit()` attaches to it although `JAVA_HOME` names the other JDK; `.jloadJVM()` rejects B, and with `explicit` selects A's own file first |
 | every scenario | before anything is mapped, `RgetMappedJVM` is `NULL`: rJava's own JNI wrappers are not taken for a JVM |
-| `jengine`, `jri.R` | JRI started from R; a Java host embedding R, where `.jloadJVM()` rejects the `JAVA_HOME` runtime and rJava attaches to the host JVM (Linux and macOS) |
+| `jengine`, `jri.R` | JRI started from R; a Java host embedding R, where `.jloadJVM()` rejects the `JAVA_HOME` runtime and rJava attaches to the host JVM (all three platforms, both host JDKs) |
 | `dll-search.c` | Windows DLL search state after failed and successful loads |
+| `msvc.R` | Windows later native loads without System32 VC++ DLLs; loaded runtime origins |
+| `overlay.R` | actual distro 5.15, frozen mainline 6.1.0 and current-kernel overlayfs behavior |
 | downstream | rJavaEnv and two minimal consumer packages (current pair only) |
 
 Bounded matrix, each on Linux, macOS (arm64) and Windows with R release; the
@@ -189,25 +212,19 @@ from the repository root, one process per scenario.
 - Attaching to a JVM created by a host requires rJava's `java/boot` on the
   host's class path on JDK 9+, as before: rJava cannot add it to a running
   application class loader there.
-- Windows source installs build no JRI, as on upstream master:
-  `configure.win` still looks for `jri/` although JRI moved to `src/jri` in
-  1.0-15, and `src/jri/Rdecl.h` includes `<Rinterface.h>`, which R does not
-  ship on Windows. JRI embedding is therefore tested on Linux and macOS only;
-  attaching to a created JVM is tested on Windows with the native helper.
-- Windows AWT later loads depend on a VC++ runtime outside the JDK, as above.
 - Mapped JVM discovery covers Linux, macOS and Windows only; elsewhere djni
   lists no mapped libraries, so it cannot reject a conflict. It cannot see libraries
   in another `dlmopen()` namespace, and identifies a renamed JVM only by
   the exports above (a JVM without `JVM_CurrentTimeMillis` must keep its
   usual name). If the mapped file cannot be identified (no `/proc` on
-  Linux, a failed query), selection is rejected. On overlayfs (e.g. Docker)
-  with Linux before 6.8, `/proc/self/maps` reports the layer file's device,
-  while `stat()` reports the overlay's, so `.jloadJVM(path)` rejects a
-  mapped library as unverifiable even when it is the same file, with or
-  without a created VM; `.jinit()` attaching to a created VM is unaffected,
-  as it compares no files. This
-  follows from the kernel source (`show_map_vma` uses `file_user_inode`
-  only from 6.8) and is not tested. dyld
+  Linux, a failed query), selection is rejected. On overlayfs (e.g. Docker),
+  kernels without the mapping-identity fix can report the layer file's
+  device/inode in `/proc/self/maps` while `stat()` reports the overlay's.
+  `.jloadJVM(path)` then rejects a mapped library as unverifiable, even when
+  it is the same file, with or without a created VM. A new R process can
+  select it normally; `.jinit()` attaching to a created VM compares no files.
+  This is exercised on the frozen mainline 6.1.0 guest, alongside successful
+  reuse on the current Ubuntu 5.15 and current-kernel guests. dyld
   records a library loaded through a symbolic link by its target, so on
   macOS the `symlink` variant shows the target name.
 - Not covered: 32-bit Windows, Windows on ARM, Linux on ARM, musl, OpenJ9 and

@@ -485,8 +485,8 @@ static int same_as_mapped(const void *addr, const char *path) {
             free(line);
             fclose(f);
         }
-        /* Before Linux 6.8, /proc/self/maps shows the device and inode of the
-           layer file under an overlayfs mapping, but stat() the overlay device. */
+        /* Some overlayfs kernels report a layer file in /proc/self/maps,
+           while stat() reports the overlay identity. A mismatch is ambiguous. */
         if (!res && !statfs(path, &fs) && fs.f_type == 0x794c7630) res = -2;
     }
 #endif
@@ -673,7 +673,7 @@ static int load_library(const char *path) {
         if (!same)
             snprintf(last_error, sizeof(last_error), "Another JVM library is already mapped: %s. Use a new R process.", jvms[0].name);
         else if (same == -2)
-            snprintf(last_error, sizeof(last_error), "Cannot verify that %s is the JVM library already mapped: %s, because overlayfs before Linux 6.8 reports another file for the mapping. Use a new R process.",
+            snprintf(last_error, sizeof(last_error), "Cannot verify that %s is the JVM library already mapped: %s, because the overlayfs mapping identity cannot be verified. Use a new R process.",
                      path, jvms[0].name);
         else if (same < 0)
             snprintf(last_error, sizeof(last_error), "Cannot verify that %s is the JVM library already mapped: %s. Use a new R process.", path, jvms[0].name);
