@@ -30,9 +30,9 @@ if ($Mode -eq 'old') {
         $old = Get-Item "$work/old/$name"
         if ($old.VersionInfo.FileMajorPart -ne 14 -or $old.VersionInfo.FileMinorPart -ne 0 -or $old.VersionInfo.FileBuildPart -ne 24212) { throw "Wrong old runtime: $name" }
         Write-Output "Old fixture $name version $($old.VersionInfo.FileVersion), SHA256 $((Get-FileHash $old).Hash)"
-        foreach ($home in $env:RJE_JAVA_HOME_A, $env:RJE_JAVA_HOME_B) {
-            $bundles = Get-ChildItem $home -Recurse -Filter $name
-            if (!$bundles) { throw "No bundled $name in $home" }
+        foreach ($javaHome in $env:RJE_JAVA_HOME_A, $env:RJE_JAVA_HOME_B) {
+            $bundles = Get-ChildItem $javaHome -Recurse -Filter $name
+            if (!$bundles) { throw "No bundled $name in $javaHome" }
             foreach ($bundle in $bundles) {
                 $v = $bundle.VersionInfo
                 $version = [version]::new($v.FileMajorPart, $v.FileMinorPart, $v.FileBuildPart, $v.FilePrivatePart)
