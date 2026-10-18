@@ -69,9 +69,11 @@ jobs:
               if grep -Eq "[ _]$sym(@|\$| )" <<< "$syms"; then echo "exports $sym"; else echo "::error::$lib does not export $sym"; exit 1; fi
             done
           done
-          echo "RJE_JAVA_HOME_A=$JAVA_A" >> "$GITHUB_ENV"
-          echo "RJE_JAVA_HOME_B=$JAVA_B" >> "$GITHUB_ENV"
-          echo "RJE_FALLBACK_HOME=$JAVA_B" >> "$GITHUB_ENV"
+          {
+            echo "RJE_JAVA_HOME_A=$JAVA_A"
+            echo "RJE_JAVA_HOME_B=$JAVA_B"
+            echo "RJE_FALLBACK_HOME=$JAVA_B"
+          } >> "$GITHUB_ENV"
       - name: Prepare Windows discovery and path fixtures
         if: runner.os == 'Windows'
         shell: pwsh
@@ -164,7 +166,7 @@ jobs:
         timeout-minutes: 5
         run: |
           Rscript --vanilla tests-integration/jri.R
-          RJE_JAVA_HOME_A="$RJE_JAVA_HOME_B" RJE_JAVA_HOME_B="$RJE_JAVA_HOME_A" Rscript --vanilla tests-integration/jri.R
+          env RJE_JAVA_HOME_A="$RJE_JAVA_HOME_B" RJE_JAVA_HOME_B="$RJE_JAVA_HOME_A" Rscript --vanilla tests-integration/jri.R
       - name: Check Windows DLL search state after loads
         if: runner.os == 'Windows'
         shell: bash
