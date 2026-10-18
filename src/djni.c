@@ -278,15 +278,22 @@ static int created_vms(HMODULE module) {
     created = (JNI_GetCreatedJavaVMs_fnptr) GetProcAddress(module, "JNI_GetCreatedJavaVMs");
     return created && created(&vm, 1, &count) == JNI_OK ? (int) count : -1;
 }
-/* Later JVM loads (AWT, Windows keystore) import MSVC DLLs by basename.
-   Prefer a loaded or system runtime; otherwise retain the selected JDK's
-   bundled copy for the process lifetime. No persistent search directory or
-   PATH change is needed. Missing optional copies remain the JDK's concern. */
+/* Keep already loaded runtimes alive; otherwise prefer the selected JDK's
+   own set, as java.exe does. Only a missing bundled copy falls back to
+   System32. References last until process exit, without changing PATH or
+   retaining a DLL search directory. Optional load failures are diagnosed. */
 static void load_bundled_msvc(void) {
-    static const wchar_t *names[] = { L"vcruntime140.dll", L"vcruntime140_1.dll", L"msvcp140.dll" };
+    static const wchar_t *names[] = {
+        L"vcruntime140.dll", L"vcruntime140_1.dll", L"msvcp140.dll",
+        L"msvcp140_1.dll", L"msvcp140_2.dll", L"msvcp140_atomic_wait.dll"
+    };
+    static HMODULE retained[sizeof(names) / sizeof(names[0])];
     wchar_t *path = module_path(jni_dl), *slash, *candidate;
     size_t i, len;
-    if (!path) return;
+    if (!path) {
+        fprintf(stderr, "rJava: cannot determine the selected JVM's MSVC runtime directory (Windows error %lu).\n", (unsigned long) GetLastError());
+        return;
+    }
     slash = wcsrchr(path, L'\\');
     if (!slash) { free(path); return; }
     *slash = 0; /* bin\server */
@@ -294,19 +301,35 @@ static void load_bundled_msvc(void) {
     if (!slash) { free(path); return; }
     *slash = 0; /* bin */
     len = wcslen(path);
-    candidate = malloc(sizeof(wchar_t) * (len + 32));
+    candidate = malloc(sizeof(wchar_t) * (len + 64));
     if (candidate) {
         for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-            if (GetModuleHandleW(names[i])) continue;
-            if (LoadLibraryExW(names[i], NULL, LOAD_LIBRARY_SEARCH_SYSTEM32)) continue;
+            DWORD attrs, error;
+            char *name;
+            if (retained[i]) continue;
+            /* Unlike GetModuleHandleW, this owns a reference even if the
+               component that originally loaded the runtime is unloaded. */
+            if (GetModuleHandleExW(0, names[i], &retained[i])) continue;
             wcscpy(candidate, path);
             candidate[len] = L'\\';
             wcscpy(candidate + len + 1, names[i]);
-            if (GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES)
-                LoadLibraryExW(candidate, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+            attrs = GetFileAttributesW(candidate);
+            if (attrs != INVALID_FILE_ATTRIBUTES)
+                retained[i] = LoadLibraryExW(candidate, NULL,
+                    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+            else
+                retained[i] = LoadLibraryExW(names[i], NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+            if (retained[i]) continue;
+            error = GetLastError();
+            /* A JDK need not use every optional runtime in the list. */
+            if (attrs == INVALID_FILE_ATTRIBUTES && error == ERROR_MOD_NOT_FOUND) continue;
+            name = to_utf8(attrs != INVALID_FILE_ATTRIBUTES ? candidate : names[i]);
+            fprintf(stderr, "rJava: cannot retain MSVC runtime %s (Windows error %lu); later Java native loads may fail.\n",
+                    name ? name : "(unknown path)", (unsigned long) error);
+            free(name);
         }
         free(candidate);
-    }
+    } else fprintf(stderr, "rJava: cannot prepare MSVC runtimes: out of memory.\n");
     free(path);
 }
 static int load_library(const char *path) {
@@ -471,15 +494,17 @@ static int same_as_mapped(const void *addr, const char *path) {
         char *line = NULL;
         size_t size = 0;
         unsigned long long a = (uintptr_t) addr, start, end, ino;
-        unsigned int maj, min;
+        unsigned int maj = 0, min = 0;
+        int device_mismatch = 0;
         struct statfs fs;
         if (f) {
             while (getline(&line, &size, f) > 0)
                 if (sscanf(line, "%llx-%llx %*s %*s %x:%x %llu", &start, &end, &maj, &min, &ino) == 5 &&
                     a >= start && a < end) {
-                    if (ino)
-                        res = major(s.st_dev) == maj && minor(s.st_dev) == min &&
-                            (unsigned long long) s.st_ino == ino;
+                    if (ino) {
+                        device_mismatch = major(s.st_dev) != maj || minor(s.st_dev) != min;
+                        res = !device_mismatch && (unsigned long long) s.st_ino == ino;
+                    }
                     break;
                 }
             free(line);
@@ -487,7 +512,7 @@ static int same_as_mapped(const void *addr, const char *path) {
         }
         /* Some overlayfs kernels report a layer file in /proc/self/maps,
            while stat() reports the overlay identity. A mismatch is ambiguous. */
-        if (!res && !statfs(path, &fs) && fs.f_type == 0x794c7630) res = -2;
+        if (!res && device_mismatch && !statfs(path, &fs) && fs.f_type == 0x794c7630) res = -2;
     }
 #endif
     return res;
@@ -789,7 +814,11 @@ int djni_attach(void) {
     last_error[0] = 0;
     if (jni_dl) return -1;
     if ((res = attach_library())) return res;
-    return load_syms();
+    res = load_syms();
+#ifdef _WIN32
+    if (!res) load_bundled_msvc();
+#endif
+    return res;
 }
 int djni_unload(void) {
     if (!jni_dl) return -1;

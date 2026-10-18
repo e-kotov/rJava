@@ -31,3 +31,10 @@ void rjava_test_create_jvm(char **path, char **classpath, int *result) {
     args.ignoreUnrecognized = JNI_TRUE;
     *result = create(&vm, &env, &args);
 }
+
+#ifdef _WIN32
+/* Observe retention after the component that first loaded a runtime lets go. */
+void rjava_test_module_loaded(char **name, int *result) {
+    *result = GetModuleHandleA(name[0]) != NULL;
+}
+#endif

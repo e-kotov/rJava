@@ -185,35 +185,22 @@ jobs:
           w() { cygpath -w "$1"; }
           PATH="/c/Windows/System32:/c/Windows" "$work/dll-search.exe" \
             "$(w "$work/missing/bin/server/jvm.dll")" "$(w "$work/copy/bin/server/jvm.dll")" "$(w "$work/missing/bin")"
-      - name: Start Java without the system VC++ runtime (Windows)
+      - name: Verify bundled runtimes with installed system DLLs
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $hidden = @()
-          try {
-            foreach ($f in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
-              $p = Join-Path $env:SystemRoot "System32\$f"
-              if (Test-Path $p) {
-                takeown /f $p | Out-Null
-                if ($LASTEXITCODE -ne 0) { throw "takeown failed: $p" }
-                icacls $p /grant '*S-1-5-32-544:F' | Out-Null
-                if ($LASTEXITCODE -ne 0) { throw "icacls failed: $p" }
-                Rename-Item $p "$f.rjava-hidden"
-                $hidden += $p
-              }
-              if (Test-Path $p) { throw "Runtime still visible: $p" }
-            }
-            Write-Output "Hidden: $hidden"
-            Rscript --vanilla tests-integration/deferred.R select
-            if ($LASTEXITCODE -ne 0) { throw 'JVM startup failed without system VC++ runtime' }
-            Rscript --vanilla tests-integration/msvc.R laterload
-            if ($LASTEXITCODE -ne 0) { throw 'Late native loads failed for JDK A' }
-            Rscript --vanilla tests-integration/msvc.R laterload b
-            if ($LASTEXITCODE -ne 0) { throw 'Late native loads failed for JDK B' }
-          } finally {
-            foreach ($p in $hidden) { Rename-Item "$p.rjava-hidden" (Split-Path $p -Leaf) }
-          }
+        run: ./tests-integration/windows-msvc.ps1 -Mode normal
+      - name: Verify startup and host attachment without system VC++ DLLs
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests-integration/windows-msvc.ps1 -Mode missing
+      - name: Verify startup and host attachment with VC++ 2015 in System32
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests-integration/windows-msvc.ps1 -Mode old
+      - name: Check Windows JRI failure and opt-out behavior
+        if: runner.os == 'Windows' && matrix.set == 'current'
+        shell: bash
+        run: bash tests-integration/jri-optional.sh
       - uses: actions/checkout@v4
         if: matrix.downstream
         with:

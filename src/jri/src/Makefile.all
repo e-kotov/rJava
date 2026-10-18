@@ -10,10 +10,12 @@ all: $(TARGETS)
 
 JRI.jar: $(JRI_JSRC) $(JNIPREFIX)jri$(JNISO)
 	$(JAVAC) $(JFLAGS) $(JRI_JFLAGS) -d . $(JRI_JSRC)
+	if [ -f org_rosuda_JRI_Rengine.h ]; then tr -d '\r' < org_rosuda_JRI_Rengine.h > jri-header.tmp && mv jri-header.tmp org_rosuda_JRI_Rengine.h; fi
 	$(JAR) fc $@ org $(JNIPREFIX)jri$(JNISO)
 
 org_rosuda_JRI_Rengine.h: org/rosuda/JRI/Rengine.class
 	if [ -n "$(JAVAH)" ]; then $(JAVAH) -d . -classpath . org.rosuda.JRI.Rengine; fi
+	if [ -f org_rosuda_JRI_Rengine.h ]; then tr -d '\r' < org_rosuda_JRI_Rengine.h > jri-header.tmp && mv jri-header.tmp org_rosuda_JRI_Rengine.h; fi
 
 Rcallbacks.o: Rcallbacks.c Rcallbacks.h globals.h rjstring.h org_rosuda_JRI_Rengine.h
 	$(CC) -c -o $@ $< $(CFLAGS) $(CPICF) $(JAVAINC) $(RINC) $(JRI_CPPFLAGS)
@@ -44,6 +46,7 @@ win32/libjvm.dll.a:
 
 org/rosuda/JRI/Rengine.class org/rosuda/JRI/REXP.class org/rosuda/JRI/Mutex.class: $(JRI_JSRC)
 	$(JAVAC) $(JFLAGS) $(JRI_JFLAGS) -d . $^
+	if [ -f org_rosuda_JRI_Rengine.h ]; then tr -d '\r' < org_rosuda_JRI_Rengine.h > jri-header.tmp && mv jri-header.tmp org_rosuda_JRI_Rengine.h; fi
 
 clean:
 	rm -rf $(TARGETS) org *.o *~ org_rosuda_JRI_Rengine.h *$(JNISO) *.class *~

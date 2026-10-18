@@ -6,15 +6,15 @@ expect=$2
 work="$RUNNER_TEMP/overlay-$release"
 mkdir -p "$work"
 case "$release" in
-  jammy) version=22.04 ;;
-  noble) version=24.04 ;;
+  jammy) version=22.04; snapshot=20261004; image_sha=012d81fade7e8ff4428fc35dfeee711d66d1f47d5ea9c5c8ced96a85b959835c ;;
+  noble) version=24.04; snapshot=20261017; image_sha=04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94 ;;
   *) exit 2 ;;
 esac
 image="ubuntu-$version-server-cloudimg-amd64.img"
-base="https://cloud-images.ubuntu.com/releases/$release/release"
+base="https://cloud-images.ubuntu.com/releases/$release/release-$snapshot"
 curl --fail --location --retry 3 "$base/$image" -o "$work/$image"
-curl --fail --location --retry 3 "$base/SHA256SUMS" -o "$work/SHA256SUMS"
-(cd "$work" && awk -v image="$image" '$2 == image || $2 == "*" image' SHA256SUMS > selected.sha256 && test -s selected.sha256 && sha256sum -c selected.sha256)
+printf '%s  %s\n' "$image_sha" "$image" > "$work/selected.sha256"
+(cd "$work" && sha256sum -c selected.sha256)
 qemu-img resize "$work/$image" 16G
 ssh-keygen -t ed25519 -N '' -f "$work/key"
 cat > "$work/user-data" <<CONFIG
@@ -37,8 +37,11 @@ sudo chmod a+r "$work/qemu.pid" "$work/serial.log"
 trap 'sudo kill "$(cat "$work/qemu.pid")" || true' EXIT
 ssh_opts=(-i "$work/key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5)
 wait_for_ssh() {
+  local previous_boot=${1:-} boot
   for _attempt in {1..60}; do
-    if ssh "${ssh_opts[@]}" -p 2222 ubuntu@127.0.0.1 true 2>/dev/null; then return 0; fi
+    if boot=$(ssh "${ssh_opts[@]}" -p 2222 ubuntu@127.0.0.1 cat /proc/sys/kernel/random/boot_id 2>/dev/null); then
+      if [[ -n "$boot" && "$boot" != "$previous_boot" ]]; then return 0; fi
+    fi
     sleep 5
   done
   cat "$work/serial.log"
@@ -63,9 +66,9 @@ ef4cf195e9e6840318e7fe9227d4ddccaf44ce44f0324d5dbd418ecaa72dc2d4  ${packages[1]}
 SUMS
   (cd "$work" && sha256sum -c kernel.sha256)
   scp "${ssh_opts[@]}" -P 2222 "${packages[@]/#/$work/}" ubuntu@127.0.0.1:
-  ssh "${ssh_opts[@]}" -p 2222 ubuntu@127.0.0.1 'cloud-init status --wait && sudo dpkg -i linux-modules-*.deb linux-image-*.deb && sudo systemd-run --on-active=3s /sbin/reboot'
-  sleep 15
-  wait_for_ssh
+  previous_boot=$(ssh "${ssh_opts[@]}" -p 2222 ubuntu@127.0.0.1 cat /proc/sys/kernel/random/boot_id)
+  ssh "${ssh_opts[@]}" -p 2222 ubuntu@127.0.0.1 'set -e; cloud-init status --wait || test "$?" -eq 2; sudo dpkg -i linux-modules-*.deb linux-image-*.deb; sudo systemd-run --on-active=3s /sbin/reboot'
+  wait_for_ssh "$previous_boot"
   ssh "${ssh_opts[@]}" -p 2222 ubuntu@127.0.0.1 'test "$(uname -r)" = 6.1.0-060100-generic'
 fi
 # Include the checked-out REngine submodule, without Git metadata or VM files.
@@ -74,9 +77,9 @@ scp "${ssh_opts[@]}" -P 2222 "$work/source.tar.gz" ubuntu@127.0.0.1:source.tar.g
 ssh "${ssh_opts[@]}" -p 2222 ubuntu@127.0.0.1 "sudo bash -s -- '$expect'" <<'GUEST'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-cloud-init status --wait
+cloud-init status --wait || [[ $? == 2 ]]
 apt-get update -qq
-apt-get install -y --no-install-recommends r-base-dev openjdk-17-jdk-headless libtirpc-dev libicu-dev make g++ unzip zip
+apt-get install -y --no-install-recommends r-base-dev openjdk-17-jdk-headless libtirpc-dev libicu-dev e2fsprogs util-linux make g++ unzip zip
 mkdir /home/ubuntu/source
 cd /home/ubuntu/source
 tar -xzf ../source.tar.gz
@@ -86,18 +89,10 @@ sh mkdist > /home/ubuntu/build.log 2>&1 || { cat /home/ubuntu/build.log; exit 1;
 mkdir /opt/rjava-lib
 R CMD INSTALL --library=/opt/rjava-lib ../rJava_*.tar.gz
 export R_LIBS=/opt/rjava-lib
-mkdir -p /opt/overlay/{lower,upper,work,merged} /opt/jdk-b
-cp -a "$JAVA_HOME/." /opt/overlay/lower/
-cp -a "$JAVA_HOME/." /opt/jdk-b/
-mount -t overlay overlay -o lowerdir=/opt/overlay/lower,upperdir=/opt/overlay/upper,workdir=/opt/overlay/work /opt/overlay/merged
-findmnt /opt/overlay/merged
 uname -a
-export RJE_JAVA_HOME_A=/opt/overlay/merged RJE_JAVA_HOME_B=/opt/jdk-b RJE_OVERLAY_EXPECT="$1"
 mkdir /tmp/jvmhost
 cp tests-integration/jvmhost.c /tmp/jvmhost/
 (cd /tmp/jvmhost && PKG_CPPFLAGS=-I/home/ubuntu/source/src R CMD SHLIB jvmhost.c)
 export RJE_JVMHOST=/tmp/jvmhost/jvmhost.so
-for scenario in fresh preloaded hosted replaced; do
-  Rscript --vanilla tests-integration/overlay.R "$scenario"
-done
+bash tests-integration/overlay-layouts.sh "$1"
 GUEST

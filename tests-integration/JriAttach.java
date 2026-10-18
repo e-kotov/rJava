@@ -31,6 +31,28 @@ public class JriAttach {
         String text = result == null ? "ERROR|no result" : result.asString();
         String expected = "OK|attached|" + System.getProperty("java.home") + "|TRUE";
         System.out.println("JRI host " + System.getProperty("java.version") + ": " + text);
+        if (System.getProperty("os.name").startsWith("Windows")) {
+            final String[] interrupted = new String[1];
+            Thread evaluator = new Thread(new Runnable() {
+                public void run() {
+                    REXP value = engine.eval("tryCatch({Sys.sleep(60); 'MISSED'}, interrupt=function(e) 'INTERRUPTED')");
+                    interrupted[0] = value == null ? "NULL" : value.asString();
+                }
+            });
+            evaluator.setDaemon(true);
+            evaluator.start();
+            try {
+                Thread.sleep(1000);
+                engine.rniStop(0);
+                evaluator.join(10000);
+            } catch (InterruptedException e) { throw new RuntimeException(e); }
+            if (evaluator.isAlive() || !"INTERRUPTED".equals(interrupted[0]) ||
+                engine.eval("as.integer(1+1)").asInt() != 2) {
+                System.err.println("FAIL: JRI interrupt/recovery: " + interrupted[0]);
+                System.exit(3);
+            }
+            System.out.println("PASS jri-interrupt-recovery");
+        }
         engine.end();
         if (!expected.equals(text)) {
             System.err.println("FAIL: expected " + expected);

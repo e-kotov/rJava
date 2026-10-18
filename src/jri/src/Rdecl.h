@@ -6,6 +6,10 @@
 
 #include <Rversion.h>
 
+#if defined(_WIN64) && !defined(WIN64)
+#define WIN64 1
+#endif
+
 #ifndef Win32
 #define R_INTERFACE_PTRS 1
 #define CSTACK_DEFNS 1
@@ -24,5 +28,9 @@ void run_Rmainloop(void); /* main/main.c */
 int  R_ReadConsole(char*, unsigned char*, int, int); /* include/Defn.h */
 int  Rf_initialize_R(int ac, char **av); /* include/Rembedded.h - exists since 2.4.0 */
 #endif /* R < 4.6.0 */
+
+#if defined(Win32) && R_VERSION < R_Version(4,6,0)
+extern __declspec(dllimport) int UserBreak;
+#endif
 
 #endif /* __RDECL_H__ */

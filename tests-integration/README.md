@@ -109,20 +109,35 @@ is never changed. `dll-search.c` checks the removal with a positive control.
 Later native loads by the JVM (`zip`, `net`, `nio`, `management`,
 `sunmscapi`, `awt`, `fontmanager`, `freetype`) also need the JDK's MSVC runtime
 DLLs to be resolvable by basename. After verifying the JNI entry points,
-djni retains `vcruntime140.dll`, `vcruntime140_1.dll` and `msvcp140.dll` when
-available: an already loaded runtime is used first, then System32, then the
-copy bundled in the selected JDK's `bin`. No persistent search directory or
-`PATH` change is made. These references last until process exit, like the
-selected JVM itself. This can bind later imports in other native components
-to that runtime too; an already loaded or system copy is never replaced.
-JDKs that omit a required runtime still need the appropriate redistributable.
+both explicit selection and host attachment retain the selected runtime's
+MSVC DLLs. An already loaded copy is retained with `GetModuleHandleExW`;
+it cannot safely be replaced. Otherwise a copy in the selected JDK's `bin`
+is preferred, and System32 is used only when that bundled copy is absent.
+This follows the normal `java.exe` preference for its own directory and
+avoids selecting System32's older `msvcp140` after startup has already loaded
+the JDK's `vcruntime140`. References last until process exit. No persistent
+search directory or `PATH` change is made. A bundled DLL that exists but
+fails to load is diagnosed on stderr rather than silently falling back to
+a different copy. Missing optional DLLs are allowed; JDKs that omit a required
+runtime still need a suitable redistributable.
 
-The Windows jobs hide all three System32 runtime DLLs, run JVM startup and
-all later native loads for both JDKs, and fail on any error. `msvc.R` also
-checks the loaded module paths: the runtimes must come from the selected
-JDK, so another installed copy cannot silently mask a missing dependency.
-The workflow restores the hidden DLLs in a `finally` block, including on a
-failed test.
+The base VC++ DLLs and bundled `msvcp140_1`, `_2` and `_atomic_wait` satellites
+are covered. Already loaded copies retain host-process precedence: this can
+bind Java to a host's incompatible older runtime. Use a fresh process with
+a compatible runtime in that case; the loader does not replace live DLLs.
+
+Every Windows job tests normal System32 DLLs, their absence, and genuine
+Microsoft VC++ 2015 Update 3 (14.0.24212.0) DLLs temporarily placed in System32.
+The old installer is downloaded from Microsoft's distribution site and
+pinned by SHA256; only its DLLs are extracted, and file versions must prove
+they are older than each selected JDK's bundled copies. A clean-process
+control loads the old System32 DLL. `msvc.R` then checks startup, late native
+loads after host attachment, and actual loaded module paths for both JDKs.
+A separate case releases the original reference to a preloaded MSVC DLL and
+checks rJava's retained reference keeps it mapped. Java-host JRI also runs
+without system DLLs and with the old copies. Files are restored in `finally`,
+including on a failed test. These mutations occur only on disposable Actions
+runners.
 
 ## Windows JRI builds
 
@@ -132,6 +147,20 @@ explicit default targets so R's included Makeconf cannot select an unrelated
 rule. Windows uses its own console declaration instead of the Unix-only
 `Rinterface.h`; the x64 build also enables JRI's existing Win64 branches.
 
+JRI is built by default, and a build failure stops installation. To omit it
+explicitly, use `JRI=0 R CMD INSTALL rJava_<version>.tar.gz`; normal rJava/JNI
+functionality remains available. `IGNORE=1 R CMD INSTALL ...` instead attempts
+JRI and permits installation if that optional build fails. CI forces a real
+`javac` failure to check the default failure and `IGNORE=1` fallback, and tests
+the explicit `JRI=0` path. A full JDK is needed to build JRI.
+
+`WIN64` is derived from the compiler's `_WIN64`, independently of `R_ARCH`.
+The Windows import declaration for `UserBreak` comes from R's header on R
+4.6+ and a compatibility declaration on older R. Generated JNI headers are
+normalised to LF, avoiding a Windows-only line-ending check NOTE. The Java
+host test interrupts a sleeping R evaluation through `rniStop` and requires
+both interrupt delivery and subsequent R evaluation to succeed.
+
 Every Windows runtime pair now runs `.jengine()` from R and a Java host
 embedding R through JRI. The latter runs with both JDKs as host, with
 `JAVA_HOME` deliberately naming the other runtime. The test requires rJava
@@ -140,20 +169,27 @@ to reject that other runtime and attach to the host's already running JVM.
 ## Overlayfs kernel checks
 
 `overlay.yaml` boots real QEMU/KVM guests; a container alone would reuse the
-runner's kernel. Each guest records its actual kernel, mount, mapping device
-and inode, and the inode returned by `stat()`. Tests cover a fresh JVM,
-a preloaded JVM library, a host-created JVM and replacement of a mapped
-library through overlayfs. Each case runs in a fresh R process.
+runner's kernel. Ubuntu image snapshots and the frozen mainline kernel are
+pinned by SHA256. Reboot readiness checks the boot ID rather than sleeping
+for a fixed duration. Each guest records its actual kernel and mounts.
 
-The matrix includes Ubuntu 22.04's current 5.15 kernel, Ubuntu 24.04's
-current kernel (at least 6.8), and the frozen Ubuntu mainline 6.1.0 build
-`6.1.0-060100.202303090726` (packages pinned by SHA256). A current distro
-kernel can carry fixes, so a release number below 6.8 alone does not predict
-its behavior. The distro 5.15 and current-kernel jobs require same-file
-reuse to succeed. The frozen mainline job requires the ambiguous overlay
-identity to be rejected with the explicit diagnostic. Fresh selection and
-attachment to a host-created VM must work on all three. Selecting a
-different or replaced library must always fail.
+Each kernel exercises four layouts: all layers on one filesystem, separate
+ext4 filesystems with `xino=off`, separate ext4 filesystems with `xino=on`,
+and a rootless mount created in an unprivileged user's user namespace.
+Tests on privileged mounts run as the unprivileged user too. Each layout
+covers a fresh JVM, a preloaded library, a host-created JVM, and replacement
+of the mapped file, in separate R processes. Module identities and `stat()`
+identities are logged; assertions distinguish a definite different-file
+refusal from an unverifiable overlay identity.
+
+The kernels are Ubuntu 22.04's 5.15, Ubuntu 24.04's 6.8, and frozen mainline
+6.1.0 (`6.1.0-060100.202303090726`). Older kernels with the mapping-identity
+limitation reject ambiguous same-file reuse, while fresh startup and host
+attachment work. Cross-filesystem `xino=off` can report real backing devices;
+a device mismatch is conservatively unverifiable, while equal devices with
+different inodes are definitely different files. A distro version below
+6.8 alone does not predict the behavior, so fixtures assert the expected
+behavior for the actual layout and record the kernel.
 
 ## Tests
 
@@ -182,8 +218,8 @@ distribution with `sh mkdist`, installs it in an isolated library, and runs:
 | every scenario | before anything is mapped, `RgetMappedJVM` is `NULL`: rJava's own JNI wrappers are not taken for a JVM |
 | `jengine`, `jri.R` | JRI started from R; a Java host embedding R, where `.jloadJVM()` rejects the `JAVA_HOME` runtime and rJava attaches to the host JVM (all three platforms, both host JDKs) |
 | `dll-search.c` | Windows DLL search state after failed and successful loads |
-| `msvc.R` | Windows later native loads without System32 VC++ DLLs; loaded runtime origins |
-| `overlay.R` | actual distro 5.15, frozen mainline 6.1.0 and current-kernel overlayfs behavior |
+| `msvc.R` | Windows normal/missing/2015 system runtimes, retained references, fresh startup and hosted late loads; loaded runtime origins |
+| `overlay.R` | actual 5.15, 6.1.0 and 6.8 kernels; four overlay layouts, unprivileged processes, exact refusal classes |
 | downstream | rJavaEnv and two minimal consumer packages (current pair only) |
 
 Bounded matrix, each on Linux, macOS (arm64) and Windows with R release; the
@@ -234,3 +270,8 @@ from the repository root, one process per scenario.
   other non-HotSpot VMs, Java runtimes without a JDK layout, R versions other
   than current release, Windows 4.5 and devel in `check.yaml`, and downstream packages
   beyond the two test consumers.
+
+Modifying a mapped JVM library in place without changing its device/inode is
+outside the identity guarantee, as for other native libraries. Replace runtime
+files atomically and use a fresh process after an upgrade. The tests exercise
+unlink/replacement, not arbitrary writes to live native-code mappings.

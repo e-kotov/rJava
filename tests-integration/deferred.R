@@ -368,6 +368,18 @@ switch(scenario,
     stopifnot(warned)
     start(expected)
   },
+  retained = {
+    stopifnot(windows)
+    dll <- file.path(dirname(dirname(lib(home_a))), "msvcp140.dll")
+    dyn.load(dll)
+    dyn.load(Sys.getenv("RJE_JVMHOST"))
+    stopifnot(.C("rjava_test_module_loaded", "msvcp140.dll", result = 0L)$result == 1L)
+    rJava::.jloadJVM(lib(home_a))
+    dyn.unload(dll)
+    stopifnot(.C("rjava_test_module_loaded", "msvcp140.dll", result = 0L)$result == 1L)
+    start(home_a)
+    later_loads()
+  },
   laterload = {
     home <- if (variant == "b") home_b else home_a
     Sys.setenv(JAVA_HOME = home)
@@ -386,7 +398,11 @@ switch(scenario,
     # jvm.dll of a copy of A's home, renamed as in replaced). .jinit() attaches
     # to the created VM, but .jloadJVM() rejects that name and B: a path
     # selects only the file mapped, also when a VM was created.
-    stopifnot(variant %in% c("", "explicit", "renamed", "replaced"), !(windows && variant == "renamed"))
+    if (variant == "laterload-b") {
+      swap <- home_a; home_a <- home_b; home_b <- swap
+      variant <- "laterload"
+    }
+    stopifnot(variant %in% c("", "explicit", "renamed", "replaced", "laterload"), !(windows && variant == "renamed"))
     helper <- Sys.getenv("RJE_JVMHOST")
     stopifnot(file.exists(helper))
     dyn.load(helper)
@@ -427,6 +443,8 @@ switch(scenario,
     }
     start(home)
     stopifnot(state()$state == "attached")
+    if (variant == "laterload") later_loads()
+    stopifnot(identical(minimal_path, Sys.getenv("PATH")))
   },
   jengine = {
     # R hosts the JVM, then JRI is loaded into it as a later native library.
