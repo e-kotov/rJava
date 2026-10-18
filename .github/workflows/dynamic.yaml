@@ -137,8 +137,7 @@ jobs:
             run "$scenario"
           done
           run hosted explicit
-          # Windows source installs build no JRI (pre-existing upstream build defects).
-          if [[ "$RUNNER_OS" != Windows ]]; then run jengine; fi
+          run jengine
           run preloaded global
           run laterload b
           run alias link
@@ -161,10 +160,11 @@ jobs:
           # A mapped DLL cannot be deleted, so Windows leaves them behind until here.
           find "$RJE_JAVA_HOME_A/" "$RJE_JAVA_HOME_B/" -name 'rjava-alias-*' -print -delete
       - name: Embed R in a Java host through JRI
-        if: runner.os != 'Windows'
         shell: bash
         timeout-minutes: 5
-        run: Rscript --vanilla tests-integration/jri.R
+        run: |
+          Rscript --vanilla tests-integration/jri.R
+          RJE_JAVA_HOME_A="$RJE_JAVA_HOME_B" RJE_JAVA_HOME_B="$RJE_JAVA_HOME_A" Rscript --vanilla tests-integration/jri.R
       - name: Check Windows DLL search state after loads
         if: runner.os == 'Windows'
         shell: bash
@@ -186,32 +186,31 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # Runner images install the VC++ runtime in System32, which masks
-          # whether JVM dependencies resolve from the JDK. Hide it: jvm.dll and
-          # its startup libraries must still load. Later loads that import
-          # another runtime DLL (awt.dll -> MSVCP140.dll) are recorded only.
+          $ErrorActionPreference = 'Stop'
           $hidden = @()
-          foreach ($f in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
-            $p = Join-Path $env:SystemRoot "System32\$f"
-            if (Test-Path $p) {
-              takeown /f $p | Out-Null
-              icacls $p /grant '*S-1-5-32-544:F' | Out-Null
-              Rename-Item $p "$f.rjava-hidden"
-              $hidden += $p
+          try {
+            foreach ($f in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
+              $p = Join-Path $env:SystemRoot "System32\$f"
+              if (Test-Path $p) {
+                takeown /f $p | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "takeown failed: $p" }
+                icacls $p /grant '*S-1-5-32-544:F' | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "icacls failed: $p" }
+                Rename-Item $p "$f.rjava-hidden"
+                $hidden += $p
+              }
+              if (Test-Path $p) { throw "Runtime still visible: $p" }
             }
+            Write-Output "Hidden: $hidden"
+            Rscript --vanilla tests-integration/deferred.R select
+            if ($LASTEXITCODE -ne 0) { throw 'JVM startup failed without system VC++ runtime' }
+            Rscript --vanilla tests-integration/deferred.R laterload
+            if ($LASTEXITCODE -ne 0) { throw 'Late native loads failed for JDK A' }
+            Rscript --vanilla tests-integration/deferred.R laterload b
+            if ($LASTEXITCODE -ne 0) { throw 'Late native loads failed for JDK B' }
+          } finally {
+            foreach ($p in $hidden) { Rename-Item "$p.rjava-hidden" (Split-Path $p -Leaf) }
           }
-          Write-Output "Hidden: $hidden"
-          Get-ChildItem "$env:RJE_JAVA_HOME_A" -Recurse -Include 'msvc*.dll', 'vcruntime*.dll' | ForEach-Object FullName
-          Rscript --vanilla tests-integration/deferred.R select
-          $select = $LASTEXITCODE
-          Rscript --vanilla tests-integration/deferred.R laterload
-          $later = $LASTEXITCODE
-          Rscript --vanilla tests-integration/deferred.R laterload b
-          $laterb = $LASTEXITCODE
-          foreach ($p in $hidden) { Rename-Item "$p.rjava-hidden" (Split-Path $p -Leaf) }
-          Write-Output "EVIDENCE without System32 VC++ runtime: select exit $select, laterload exit $later (A), $laterb (B)"
-          if ($select -ne 0) { exit 1 }
-          exit 0
       - uses: actions/checkout@v4
         if: matrix.downstream
         with:

@@ -6,9 +6,14 @@
 
 #include <Rversion.h>
 
+#ifndef Win32
 #define R_INTERFACE_PTRS 1
 #define CSTACK_DEFNS 1
 #include <Rinterface.h> /* R_ReadConsole since 4.6.0 */
+#else
+/* Rinterface.h is Unix-only and is not shipped by Windows R. */
+int R_ReadConsole(const char *, unsigned char *, int, int);
+#endif
 
 /* some have been added to R 4.6.0 */
 #if R_VERSION >= R_Version(4,6,0)

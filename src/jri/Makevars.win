@@ -6,6 +6,9 @@ JNISO=.dll
 JAVA_LIBS=-Lwin32 -ljvm
 JNILD=-shared $(JAVA_LIBS) -L$(RHOME)/src/gnuwin32 -L$(RHOME)/bin$(R_ARCH) -lR -Wl,--kill-at
 CFLAGS+=-DWin32 -D_JNI_IMPLEMENTATION_
+ifeq ($(R_ARCH),/x64)
+CFLAGS+=-DWIN64
+endif
 JAVA_PROG=$(JAVAHOME)/bin/java
 JAVA=$(JAVAHOME)/bin/java
 JAVAC=$(JAVAHOME)/bin/javac

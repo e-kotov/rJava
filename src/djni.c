@@ -278,6 +278,37 @@ static int created_vms(HMODULE module) {
     created = (JNI_GetCreatedJavaVMs_fnptr) GetProcAddress(module, "JNI_GetCreatedJavaVMs");
     return created && created(&vm, 1, &count) == JNI_OK ? (int) count : -1;
 }
+/* Later JVM loads (AWT, Windows keystore) import MSVC DLLs by basename.
+   Prefer a loaded or system runtime; otherwise retain the selected JDK's
+   bundled copy for the process lifetime. No persistent search directory or
+   PATH change is needed. Missing optional copies remain the JDK's concern. */
+static void load_bundled_msvc(void) {
+    static const wchar_t *names[] = { L"vcruntime140.dll", L"vcruntime140_1.dll", L"msvcp140.dll" };
+    wchar_t *path = module_path(jni_dl), *slash, *candidate;
+    size_t i, len;
+    if (!path) return;
+    slash = wcsrchr(path, L'\\');
+    if (!slash) { free(path); return; }
+    *slash = 0; /* bin\server */
+    slash = wcsrchr(path, L'\\');
+    if (!slash) { free(path); return; }
+    *slash = 0; /* bin */
+    len = wcslen(path);
+    candidate = malloc(sizeof(wchar_t) * (len + 32));
+    if (candidate) {
+        for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+            if (GetModuleHandleW(names[i])) continue;
+            if (LoadLibraryExW(names[i], NULL, LOAD_LIBRARY_SEARCH_SYSTEM32)) continue;
+            wcscpy(candidate, path);
+            candidate[len] = L'\\';
+            wcscpy(candidate + len + 1, names[i]);
+            if (GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES)
+                LoadLibraryExW(candidate, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+        }
+        free(candidate);
+    }
+    free(path);
+}
 static int load_library(const char *path) {
     wchar_t *wide = NULL, *full = NULL, *bin = NULL, *slash;
     struct jvm_image *jvms = NULL;
@@ -745,7 +776,11 @@ int djni_load(const char *path) {
     last_error[0] = 0;
     if (jni_dl) return -1;
     if ((res = load_library(path))) return res;
-    return load_syms();
+    res = load_syms();
+#ifdef _WIN32
+    if (!res) load_bundled_msvc();
+#endif
+    return res;
 }
 /* returns: 0 = success, -1 = already loaded, -3 = symbols not found, -4 = no
    single mapped JVM library with a created VM */
