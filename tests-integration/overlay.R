@@ -1,9 +1,9 @@
 # Real overlayfs in a VM. Each mode runs in a fresh process.
 scenario <- commandArgs(TRUE)[1]
 expect <- Sys.getenv("RJE_OVERLAY_EXPECT")
-stopifnot(expect %in% c("legacy", "current"), Sys.info()[["sysname"]] == "Linux")
+stopifnot(expect %in% c("legacy", "distro", "current"), Sys.info()[["sysname"]] == "Linux")
 kernel <- numeric_version(sub("-.*", "", Sys.info()[["release"]]))
-stopifnot(if (expect == "legacy") kernel < "6.8" else kernel >= "6.8")
+stopifnot(if (expect == "current") kernel >= "6.8" else kernel < "6.8")
 a <- Sys.getenv("RJE_JAVA_HOME_A")
 b <- Sys.getenv("RJE_JAVA_HOME_B")
 Sys.setenv(JAVA_HOME = a, PATH = "/usr/bin:/bin")
@@ -48,7 +48,7 @@ if (scenario == "fresh") {
       Sys.setenv(JAVA_HOME = b)
       start() # Attach has no pathname comparison, including on old overlayfs.
       stopifnot(state() == "attached")
-    } else if (expect == "current") start()
+    } else if (expect != "legacy") start()
   }
 }
 cat("PASS overlay", expect, as.character(kernel), scenario, "\n")

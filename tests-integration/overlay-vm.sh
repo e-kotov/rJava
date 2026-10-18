@@ -36,12 +36,38 @@ sudo qemu-system-x86_64 -accel kvm -cpu host -smp 2 -m 3072 \
 sudo chmod a+r "$work/qemu.pid" "$work/serial.log"
 trap 'sudo kill "$(cat "$work/qemu.pid")" || true' EXIT
 ssh_opts=(-i "$work/key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5)
-ready=false
-for _attempt in {1..60}; do
-  if ssh "${ssh_opts[@]}" -p 2222 ubuntu@127.0.0.1 true 2>/dev/null; then ready=true; break; fi
-  sleep 5
-done
-if ! "$ready"; then cat "$work/serial.log"; exit 1; fi
+wait_for_ssh() {
+  for _attempt in {1..60}; do
+    if ssh "${ssh_opts[@]}" -p 2222 ubuntu@127.0.0.1 true 2>/dev/null; then return 0; fi
+    sleep 5
+  done
+  cat "$work/serial.log"
+  return 1
+}
+wait_for_ssh
+if [[ "$expect" == legacy ]]; then
+  # Current distro 5.15 kernels can carry overlayfs fixes. Also boot a frozen
+  # pre-6.8 mainline build, so the ambiguous-identity case is really exercised.
+  mainline=https://kernel.ubuntu.com/mainline/v6.1/amd64
+  kernel_version=6.1.0-060100
+  kernel_build=6.1.0-060100.202303090726
+  packages=("linux-image-unsigned-${kernel_version}-generic_${kernel_build}_amd64.deb"
+            "linux-modules-${kernel_version}-generic_${kernel_build}_amd64.deb")
+  for package in "${packages[@]}"; do
+    curl --fail --location --retry 3 "$mainline/$package" -o "$work/$package"
+  done
+  # SHA256 values from the release's CHECKSUMS, pinned with the package names.
+  cat > "$work/kernel.sha256" <<SUMS
+178f3cdfd9bd587a77c8b0efae050cfa98718dec51dce1e98b9530f6de5185d5  ${packages[0]}
+ef4cf195e9e6840318e7fe9227d4ddccaf44ce44f0324d5dbd418ecaa72dc2d4  ${packages[1]}
+SUMS
+  (cd "$work" && sha256sum -c kernel.sha256)
+  scp "${ssh_opts[@]}" -P 2222 "${packages[@]/#/$work/}" ubuntu@127.0.0.1:
+  ssh "${ssh_opts[@]}" -p 2222 ubuntu@127.0.0.1 'cloud-init status --wait; sudo dpkg -i linux-modules-*.deb linux-image-*.deb && sudo reboot'
+  sleep 15
+  wait_for_ssh
+  ssh "${ssh_opts[@]}" -p 2222 ubuntu@127.0.0.1 'test "$(uname -r)" = 6.1.0-060100-generic'
+fi
 # Include the checked-out REngine submodule, without Git metadata or VM files.
 tar --exclude=.git -czf "$work/source.tar.gz" .
 scp "${ssh_opts[@]}" -P 2222 "$work/source.tar.gz" ubuntu@127.0.0.1:source.tar.gz

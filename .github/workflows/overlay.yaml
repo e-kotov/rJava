@@ -15,6 +15,7 @@ jobs:
       matrix:
         include:
           - {release: jammy, expect: legacy}
+          - {release: jammy, expect: distro}
           - {release: noble, expect: current}
     steps:
       - uses: actions/checkout@v4
@@ -27,5 +28,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: overlay-${{ matrix.release }}
+          name: overlay-${{ matrix.release }}-${{ matrix.expect }}
           path: ${{ runner.temp }}/overlay-${{ matrix.release }}/serial.log
