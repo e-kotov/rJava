@@ -133,7 +133,9 @@ pinned by SHA256; only its DLLs are extracted, and file versions must prove
 they are older than each selected JDK's bundled copies. A clean-process
 control loads the old System32 DLL. `msvc.R` then checks startup, late native
 loads after host attachment, and actual loaded module paths for both JDKs.
-A separate case releases the original reference to a preloaded MSVC DLL and
+The native host fixture selects its startup dependencies with a scoped JDK
+`bin` search; rJava must resolve late dependencies independently after that
+search scope has ended. A separate case releases the original reference to a preloaded MSVC DLL and
 checks rJava's retained reference keeps it mapped. Java-host JRI also runs
 without system DLLs and with the old copies. Files are restored in `finally`,
 including on a failed test. These mutations occur only on disposable Actions
@@ -185,8 +187,9 @@ refusal from an unverifiable overlay identity.
 The kernels are Ubuntu 22.04's 5.15, Ubuntu 24.04's 6.8, and frozen mainline
 6.1.0 (`6.1.0-060100.202303090726`). Older kernels with the mapping-identity
 limitation reject ambiguous same-file reuse, while fresh startup and host
-attachment work. Cross-filesystem `xino=off` can report real backing devices;
-a device mismatch is conservatively unverifiable, while equal devices with
+attachment work. Cross-filesystem `xino=off` also produces a device mismatch on these modern
+kernels, so preloaded path selection is conservatively refused there too. A
+device mismatch is unverifiable, while equal devices with
 different inodes are definitely different files. A distro version below
 6.8 alone does not predict the behavior, so fixtures assert the expected
 behavior for the actual layout and record the kernel.

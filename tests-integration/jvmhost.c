@@ -3,7 +3,10 @@
    global symbols, like the java launcher. Build with
      PKG_CPPFLAGS=-I<rJava>/src R CMD SHLIB jvmhost.c */
 #ifdef _WIN32
+#define _WIN32_WINNT 0x0602
 #include <windows.h>
+#include <stdlib.h>
+#include <wchar.h>
 #else
 #include <dlfcn.h>
 #endif
@@ -16,7 +19,25 @@ void rjava_test_create_jvm(char **path, char **classpath, int *result) {
     JavaVM *vm;
     void *env;
 #ifdef _WIN32
-    HMODULE lib = LoadLibraryExA(path[0], NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    /* A real native host must choose its own startup dependencies. Use the
+       selected JDK's bin only during this load, like java.exe's app directory;
+       rJava must independently arrange any later MSVC loads after attaching. */
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path[0], -1, NULL, 0);
+    wchar_t *wide = n ? malloc(sizeof(wchar_t) * n) : NULL;
+    wchar_t *bin = n ? malloc(sizeof(wchar_t) * n) : NULL, *slash;
+    DLL_DIRECTORY_COOKIE cookie = NULL;
+    HMODULE lib = NULL;
+    if (wide && bin && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path[0], -1, wide, n)) {
+        for (slash = wide; *slash; slash++) if (*slash == L'/') *slash = L'\\';
+        wcscpy(bin, wide);
+        if ((slash = wcsrchr(bin, L'\\'))) {
+            *slash = 0;
+            if ((slash = wcsrchr(bin, L'\\'))) { *slash = 0; cookie = AddDllDirectory(bin); }
+        }
+        lib = LoadLibraryExW(wide, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+        if (cookie) RemoveDllDirectory(cookie);
+    }
+    free(wide); free(bin);
     if (lib) create = (JNI_CreateJavaVM_fnptr) GetProcAddress(lib, "JNI_CreateJavaVM");
 #else
     void *lib = dlopen(path[0], RTLD_NOW | RTLD_GLOBAL);

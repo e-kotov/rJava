@@ -10,7 +10,7 @@ if (Sys.getenv("RJE_OVERLAY_USERNS") == "1") {
 } else stopifnot(uid != 0L)
 ambiguous <- "^Cannot verify that .*because the overlayfs mapping identity cannot be verified[.]"
 different <- "^Another JVM library is already mapped:"
-same_ambiguous <- expect == "legacy" && layout != "cross-off"
+same_ambiguous <- expect == "legacy" || layout == "cross-off"
 stopifnot(expect %in% c("legacy", "distro", "current"), Sys.info()[["sysname"]] == "Linux")
 kernel <- numeric_version(sub("-.*", "", Sys.info()[["release"]]))
 stopifnot(if (expect == "current") kernel >= "6.8" else kernel < "6.8")
