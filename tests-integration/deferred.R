@@ -370,12 +370,19 @@ switch(scenario,
   },
   retained = {
     stopifnot(windows)
-    dll <- file.path(dirname(dirname(lib(home_a))), "msvcp140.dll")
+    bin <- dirname(dirname(lib(home_a)))
+    # Keep the fixture coherent before rJava runs: a plain dyn.load(msvcp)
+    # otherwise pulls its VCRUNTIME imports from System32.
+    dependencies <- file.path(bin, c("vcruntime140.dll", "vcruntime140_1.dll"))
+    dependencies <- dependencies[file.exists(dependencies)]
+    for (dependency in dependencies) dyn.load(dependency)
+    dll <- file.path(bin, "msvcp140.dll")
     dyn.load(dll)
     dyn.load(Sys.getenv("RJE_JVMHOST"))
     stopifnot(.C("rjava_test_module_loaded", "msvcp140.dll", result = 0L)$result == 1L)
     rJava::.jloadJVM(lib(home_a))
     dyn.unload(dll)
+    for (dependency in rev(dependencies)) dyn.unload(dependency)
     stopifnot(.C("rjava_test_module_loaded", "msvcp140.dll", result = 0L)$result == 1L)
     start(home_a)
     later_loads()

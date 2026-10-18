@@ -2,11 +2,12 @@
 scenario <- commandArgs(TRUE)[1]
 expect <- Sys.getenv("RJE_OVERLAY_EXPECT")
 layout <- Sys.getenv("RJE_OVERLAY_LAYOUT")
+uid <- as.integer(system2("id", "-u", stdout = TRUE))
 stopifnot(layout %in% c("same", "cross-off", "cross-on", "rootless"))
 if (Sys.getenv("RJE_OVERLAY_USERNS") == "1") {
   ids <- scan("/proc/self/uid_map", quiet = TRUE)
-  stopifnot(Sys.getuid() == 0L, length(ids) == 3L, ids[1] == 0, ids[2] != 0, ids[3] == 1)
-} else stopifnot(Sys.getuid() != 0L)
+  stopifnot(uid == 0L, length(ids) == 3L, ids[1] == 0, ids[2] != 0, ids[3] == 1)
+} else stopifnot(uid != 0L)
 ambiguous <- "^Cannot verify that .*because the overlayfs mapping identity cannot be verified[.]"
 different <- "^Another JVM library is already mapped:"
 same_ambiguous <- expect == "legacy" && layout != "cross-off"

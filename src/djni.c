@@ -314,6 +314,14 @@ static void load_bundled_msvc(void) {
             candidate[len] = L'\\';
             wcscpy(candidate + len + 1, names[i]);
             attrs = GetFileAttributesW(candidate);
+            error = attrs == INVALID_FILE_ATTRIBUTES ? GetLastError() : 0;
+            if (error && error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
+                name = to_utf8(candidate);
+                fprintf(stderr, "rJava: cannot inspect bundled MSVC runtime %s (Windows error %lu).\n",
+                        name ? name : "(unknown path)", (unsigned long) error);
+                free(name);
+                continue;
+            }
             if (attrs != INVALID_FILE_ATTRIBUTES)
                 retained[i] = LoadLibraryExW(candidate, NULL,
                     LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
