@@ -5,14 +5,14 @@ set -euo pipefail
 expect=$1
 phase=${2:-outer}
 run_cases() {
-  local layout=$1 home=$2
-  findmnt "$home"
+  local layout=$1 selected_home=$2
+  findmnt "$selected_home"
   for scenario in fresh preloaded hosted replaced; do
     if [[ "$phase" == rootless-inner ]]; then
-      env RJE_JAVA_HOME_A="$home" RJE_OVERLAY_LAYOUT="$layout" RJE_OVERLAY_USERNS=1 \
+      env RJE_JAVA_HOME_A="$selected_home" RJE_OVERLAY_LAYOUT="$layout" RJE_OVERLAY_USERNS=1 \
         Rscript --vanilla tests-integration/overlay.R "$scenario"
     else
-      runuser -u ubuntu -- env RJE_JAVA_HOME_A="$home" RJE_OVERLAY_LAYOUT="$layout" \
+      runuser -u ubuntu -- env RJE_JAVA_HOME_A="$selected_home" RJE_OVERLAY_LAYOUT="$layout" \
         Rscript --vanilla tests-integration/overlay.R "$scenario"
     fi
   done
