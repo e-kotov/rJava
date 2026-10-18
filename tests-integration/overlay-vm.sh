@@ -63,7 +63,7 @@ ef4cf195e9e6840318e7fe9227d4ddccaf44ce44f0324d5dbd418ecaa72dc2d4  ${packages[1]}
 SUMS
   (cd "$work" && sha256sum -c kernel.sha256)
   scp "${ssh_opts[@]}" -P 2222 "${packages[@]/#/$work/}" ubuntu@127.0.0.1:
-  ssh "${ssh_opts[@]}" -p 2222 ubuntu@127.0.0.1 'cloud-init status --wait; sudo dpkg -i linux-modules-*.deb linux-image-*.deb && sudo reboot'
+  ssh "${ssh_opts[@]}" -p 2222 ubuntu@127.0.0.1 'cloud-init status --wait && sudo dpkg -i linux-modules-*.deb linux-image-*.deb && sudo systemd-run --on-active=3s /sbin/reboot'
   sleep 15
   wait_for_ssh
   ssh "${ssh_opts[@]}" -p 2222 ubuntu@127.0.0.1 'test "$(uname -r)" = 6.1.0-060100-generic'
