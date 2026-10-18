@@ -195,6 +195,9 @@ build JDK is Temurin 17:
 | current | Temurin 17 | Temurin 21 |
 | vendor | Corretto 11 | Zulu 25 |
 
+An additional Windows R 4.5 job runs the same native, JRI and VC++ checks
+with Temurin 17/21, including the console declarations for R before 4.6.
+
 The upstream `check.yaml` matrix (R devel, Zulu 8 and 11, five runner images
 including Intel macOS) also runs on this branch.
 
@@ -229,5 +232,5 @@ from the repository root, one process per scenario.
   macOS the `symlink` variant shows the target name.
 - Not covered: 32-bit Windows, Windows on ARM, Linux on ARM, musl, OpenJ9 and
   other non-HotSpot VMs, Java runtimes without a JDK layout, R versions other
-  than current release (and devel in `check.yaml`), and downstream packages
+  than current release, Windows 4.5 and devel in `check.yaml`, and downstream packages
   beyond the two test consumers.
