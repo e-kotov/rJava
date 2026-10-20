@@ -90,7 +90,7 @@ run() {
   local jdk="$1"; shift
   local dir="$server_a"; [[ "$jdk" == B ]] && dir="$server_b"
   echo "::group::$* ($jdk on LD_LIBRARY_PATH)"
-  R_JAVA_LD_LIBRARY_PATH="$dir" Rscript --vanilla tests-integration/deferred.R "$@"
+  R_JAVA_LD_LIBRARY_PATH="$dir" RJE_BYNAME="$jdk" Rscript --vanilla tests-integration/deferred.R "$@"
   echo "::endgroup::"
 }
 for scenario in select retry badinput nonascii fallback decoy; do run B "$scenario"; done
@@ -104,9 +104,16 @@ run B renamed copy
 run A renamed hardlink
 run A renamed symlink
 run A hosted renamed
-# Not replaced deleted, replaced replaced or hosted replaced: musl references
-# a mapped image by reopening its recorded name, so a JVM library under a name
-# no JVM uses is not identified once that file is deleted or replaced (README).
+# A is mapped under a name that then no longer opens it, so musl cannot take
+# a reference by that name. With either runtime on the startup library path,
+# B must be refused before it is mapped; A is accepted only when the JDK's
+# libraries would bind to it. hosted replaced runs with A only: with B on the
+# path, the host's own VM would bind A's JDK libraries to B's libjvm.so.
+for jdk in A B; do
+  run "$jdk" replaced deleted
+  run "$jdk" replaced replaced
+done
+run A hosted replaced
 # The library path names A's runtime, B is selected: refused before a VM exists.
 run A byname
 

@@ -1,12 +1,15 @@
 # Each scenario must run in a fresh R process against the installed source build:
 #   Rscript --vanilla tests-integration/deferred.R <scenario> [variant]
 # RJE_JAVA_HOME_A and RJE_JAVA_HOME_B must name two different Java homes.
+# RJE_BYNAME (musl only) is A or B: the runtime whose server directory was on
+# LD_LIBRARY_PATH when R started, the libjvm.so the JDK's libraries bind to.
 args <- commandArgs(TRUE)
 scenario <- args[1]
 variant <- if (length(args) > 1L) args[2] else ""
 windows <- .Platform$OS.type == "windows"
 home_a <- Sys.getenv("RJE_JAVA_HOME_A")
 home_b <- Sys.getenv("RJE_JAVA_HOME_B")
+byname <- Sys.getenv("RJE_BYNAME")
 stopifnot(dir.exists(home_a), dir.exists(home_b))
 log <- function(...) cat(scenario, variant, ":", ..., "\n")
 
@@ -48,6 +51,16 @@ fails <- function(expr, pattern = NULL) {
   if (!is.null(pattern) && !grepl(pattern, result))
     stop("unexpected error: ", result)
   log("rejected:", substr(gsub("\\s+", " ", result), 1L, 240L))
+}
+# Linux: a refused selection must not have mapped anything from that home,
+# not even a JVM library that is never started.
+unmapped <- function(home) {
+  if (Sys.info()[["sysname"]] != "Linux") return(invisible())
+  maps <- grep("^(\\S+\\s+){5}/", readLines("/proc/self/maps"), value = TRUE)
+  files <- unique(sub("^(\\S+\\s+){5}", "", maps))
+  hit <- files[startsWith(files, paste0(normalizePath(home), "/"))]
+  if (length(hit)) stop("mapped from ", home, ": ", paste(hit, collapse = ", "))
+  log("nothing mapped from", home)
 }
 # Map a JVM library as other native code in the process would, outside rJava.
 preload <- function(path, local = TRUE, bin = dirname(dirname(path))) {
@@ -316,19 +329,31 @@ switch(scenario,
         stopifnot(file.link(lib(home_b), path))
         log("replaced", path, "by a hard link of", lib(home_b))
       }
+      # musl takes a reference to a mapped image by opening its recorded name
+      # again, which no longer opens A's library: the image must still be
+      # identified as A's JVM before B is mapped.
       fails(internal(".jloadJVM")(lib(home_b)), "already mapped")
       fails(internal(".jloadJVM")(path), "already mapped")
       Sys.setenv(JAVA_HOME = home_b)
       fails(rJava::.jinit(), "already mapped")
-      # A's library is the mapped file, whatever is now at the mapped name.
-      internal(".jloadJVM")(lib(home_a))
-      stopifnot(state()$state == "none")
-      expect_mapped(path, 0L)
-      # The JVM finds its home from its own file name, which no longer exists
-      # if deleted.
-      if (variant == "replaced") {
-        start(home_a)
-        expect_mapped(path, 1L)
+      unmapped(home_b)
+      if (byname == "B") {
+        # musl would bind the JDK's libraries to B's libjvm.so: A is refused
+        # too, before a VM exists, and B is still not mapped.
+        fails(internal(".jloadJVM")(lib(home_a)), "libjvm.so by name")
+        unmapped(home_b)
+        expect_mapped(path, 0L)
+      } else {
+        # A's library is the mapped file, whatever is now at the mapped name.
+        internal(".jloadJVM")(lib(home_a))
+        stopifnot(state()$state == "none")
+        expect_mapped(path, 0L)
+        # The JVM finds its home from its own file name, which no longer
+        # exists if deleted.
+        if (variant == "replaced") {
+          start(home_a)
+          expect_mapped(path, 1L)
+        }
       }
     }
   },
@@ -424,6 +449,9 @@ switch(scenario,
       variant <- "laterload"
     }
     stopifnot(variant %in% c("", "explicit", "renamed", "replaced", "laterload"), !(windows && variant == "renamed"))
+    # With B's libjvm.so on musl's startup path, the host itself would bind
+    # A's JDK libraries to B's library, mapping two runtimes before rJava runs.
+    stopifnot(byname != "B")
     helper <- Sys.getenv("RJE_JVMHOST")
     stopifnot(file.exists(helper))
     dyn.load(helper)
@@ -459,6 +487,7 @@ switch(scenario,
       fails(rJava::.jloadJVM(recorded), "already mapped")
       fails(rJava::.jloadJVM(path), "already mapped")
     }
+    unmapped(home_b)
     if (variant == "explicit") {
       stopifnot(isTRUE(rJava::.jloadJVM(lib(home_a))), state()$state == "detached")
     }
