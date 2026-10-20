@@ -1,10 +1,12 @@
 name: Deferred JVM integration
 on:
   push:
-    branches: [feature/dynamic-cross-platform]
+    branches: [feature/dynamic-cross-platform, repro/musl-deleted-alias]
   workflow_dispatch:
 jobs:
   dynamic:
+    # Reproduction branch: only the musl jobs run.
+    if: false
     # Three runtime pairs per platform instead of every OS x vendor x version:
     # legacy layouts (JDK 8/11), current LTS (17/21, with downstream packages),
     # and other vendors spanning 11 to 25. The build JDK is always Temurin 17.

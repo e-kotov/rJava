@@ -109,11 +109,25 @@ run A hosted renamed
 # B must be refused before it is mapped; A is accepted only when the JDK's
 # libraries would bind to it. hosted replaced runs with A only: with B on the
 # path, the host's own VM would bind A's JDK libraries to B's libjvm.so.
+# Reproduction only: run the restored cases first, report each, then fail.
+# (set -e does not apply inside a function called in a || list.)
+failed=0
+repro() {
+  local jdk="$1"; shift
+  local dir="$server_a"; [[ "$jdk" == B ]] && dir="$server_b"
+  echo "== REPRO $* ($jdk on LD_LIBRARY_PATH)"
+  if R_JAVA_LD_LIBRARY_PATH="$dir" RJE_BYNAME="$jdk" Rscript --vanilla tests-integration/deferred.R "$@"; then
+    echo "REPRO PASSED: $jdk $*"
+  else
+    echo "REPRO FAILED: $jdk $*"; failed=1
+  fi
+}
 for jdk in A B; do
-  run "$jdk" replaced deleted
-  run "$jdk" replaced replaced
+  repro "$jdk" replaced deleted
+  repro "$jdk" replaced replaced
 done
-run A hosted replaced
+repro A hosted replaced
+exit "$failed"
 # The library path names A's runtime, B is selected: refused before a VM exists.
 run A byname
 

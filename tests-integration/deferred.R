@@ -23,6 +23,14 @@ minimal_path <- if (windows) {
 Sys.setenv(PATH = minimal_path, JAVA_HOME = file.path(tempdir(), "missing-jdk"))
 Sys.unsetenv(c("CLASSPATH", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS"))
 options(java.parameters = "-Djava.awt.headless=true")
+# Reproduction only: show the JVM libraries mapped when a scenario fails.
+options(error = function() {
+  if (file.exists("/proc/self/maps")) {
+    maps <- grep("libjvm|rjava-alias", readLines("/proc/self/maps"), value = TRUE)
+    cat("REPRO mapped JVM files:", unique(sub("^(\\S+\\s+){5}", "", maps)), sep = "\n  ")
+  }
+  quit(save = "no", status = 1)
+})
 ns <- loadNamespace("rJava")
 internal <- function(name) get(name, ns)
 state <- function() internal(".jvmState")()
