@@ -8,11 +8,12 @@ jobs:
     # Three runtime pairs per platform instead of every OS x vendor x version:
     # legacy layouts (JDK 8/11), current LTS (17/21, with downstream packages),
     # and other vendors spanning 11 to 25. The build JDK is always Temurin 17.
+    # Linux arm64 runs all three: JDK 8 there uses jre/lib/aarch64/server.
     name: ${{ matrix.os }} ${{ matrix.set }} (${{ matrix.a-dist }} ${{ matrix.a-version }}, ${{ matrix.b-dist }} ${{ matrix.b-version }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
         set: [legacy, current, vendor]
         include:
           - { set: legacy, a-dist: temurin, a-version: '8', b-dist: temurin, b-version: '11' }
@@ -21,6 +22,8 @@ jobs:
           - { set: current, a-dist: temurin, a-version: '17', b-dist: temurin, b-version: '21', downstream: true }
           - { set: vendor, a-dist: corretto, a-version: '11', b-dist: zulu, b-version: '25' }
           - { set: r45, os: windows-latest, r: '4.5', a-dist: temurin, a-version: '17', b-dist: temurin, b-version: '21' }
+          # The oldest R that DESCRIPTION accepts.
+          - { set: r36, os: ubuntu-latest, r: '3.6', a-dist: temurin, a-version: '17', b-dist: temurin, b-version: '21' }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
@@ -219,6 +222,36 @@ jobs:
         working-directory: downstream-source
         shell: Rscript {0}
         run: source("tools/test-downstream.R")
+      - name: Install xlsx test dependencies in a separate library
+        if: matrix.downstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/xlsx-lib" "$RUNNER_TEMP/xlsx-src"
+          # rJava is already on R_LIBS, so it is not installed as a dependency.
+          Rscript -e 'lib <- file.path(Sys.getenv("RUNNER_TEMP"), "xlsx-lib")
+            install.packages(c("xlsxjars", "testthat", "rprojroot", "tibble", "knitr"), lib = lib)
+            stopifnot(!dir.exists(file.path(lib, "rJava")))
+            download.packages("xlsx", file.path(Sys.getenv("RUNNER_TEMP"), "xlsx-src"), type = "source")'
+          {
+            echo "RJE_RJAVA_LIB=$R_LIBS"
+            echo "R_LIBS=$R_LIBS${{ runner.os == 'Windows' && ';' || ':' }}$RUNNER_TEMP/xlsx-lib"
+          } >> "$GITHUB_ENV"
+      - name: Start Java from a CRAN package's .onLoad (xlsx)
+        if: matrix.downstream
+        shell: bash
+        run: Rscript --vanilla tests-integration/xlsx.R
+      - name: Check the CRAN xlsx package and its tests with dynamic rJava
+        if: matrix.downstream
+        shell: bash
+        env:
+          _R_CHECK_FORCE_SUGGESTS_: 'false'
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/xlsx-src"
+          # JDK B is not the build JDK on PATH. NOAWT makes rJava set AWT headless.
+          JAVA_HOME="$RJE_JAVA_HOME_B" R CMD check --no-manual --ignore-vignettes xlsx_*.tar.gz
+          cat xlsx.Rcheck/tests/testthat.Rout* | tail -n 20
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -226,3 +259,29 @@ jobs:
           path: |
             ${{ runner.temp }}/rJava_*.tar.gz
             ${{ runner.temp }}/linkage.txt
+  musl:
+    # musl libc with Alpine's R and OpenJDK packages. Docker runs the same
+    # script on x86_64 and arm64 hosts; the container root is overlayfs on the
+    # runner's kernel, as in a typical Docker deployment.
+    name: alpine ${{ matrix.arch }} ${{ matrix.set }} (openjdk ${{ matrix.a }}, openjdk ${{ matrix.b }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04, set: legacy, a: '8', b: '11' }
+          - { arch: x86_64, runner: ubuntu-24.04, set: current, a: '17', b: '21' }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, set: current, a: '17', b: '21' }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Check deferred loading, JRI and host attachment on musl
+        env:
+          # alpine:3.24.2
+          IMAGE: alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+        run: |
+          docker run --rm -v "$PWD:/src:ro" "$IMAGE" \
+            sh -c 'apk add --no-cache bash && exec bash /src/tests-integration/musl.sh "$1" "$2" "$3"' \
+            sh '${{ matrix.a }}' '${{ matrix.b }}' '${{ matrix.arch }}'
