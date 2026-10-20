@@ -83,6 +83,37 @@ not apply the `jvm.dll` name rule, which concerns starting a VM (untested:
 the JDK cannot start a VM from a renamed `jvm.dll`). The native attach entry
 point has no exported R wrapper.
 
+## The JVM library name on Linux
+
+The JDK's own libraries (`libjava`, `libjimage`, `libzip`, ...) depend on
+`libjvm.so` by name, with only their own directory (`$ORIGIN`) as run path,
+not `server`. glibc matches that name to the loaded JVM library by its
+SONAME. musl does not: it matches only a library it found by searching, and
+searches `LD_LIBRARY_PATH` as set when the process started, then its system
+path. With a JVM library selected by path, the name is then not found, or
+names another runtime. R's `etc/ldpaths` puts `R_JAVA_LD_LIBRARY_PATH` on
+`LD_LIBRARY_PATH`, by default `lib/server` of `JAVA_HOME` at R startup or of
+the `R CMD javareconf` JDK. On Alpine, with JDK 17 configured, `.jinit()`
+with `JAVA_HOME` naming another runtime failed while the VM loaded the JDK's
+libraries: `libjava.so: JVM_DoPrivileged: symbol not found` with OpenJDK 11,
+consistent with binding to JDK 17's `libjvm.so`, which lacks that symbol,
+and `Unable to load jimage library` with OpenJDK 21.
+
+So on Linux, after loading the library and its JNI entry points, djni
+resolves `libjvm.so` with `RTLD_NOLOAD`, which loads nothing, and refuses the
+selection unless the name resolves to the selected library. The refusal
+happens before a VM is created and leaves the state `"not-loaded"`, but musl
+never unmaps a library, so it remains mapped and blocks other selections: use
+a new R process started with `JAVA_HOME` naming the runtime, or
+`R_JAVA_LD_LIBRARY_PATH` naming its server directory (needed for the JDK 8
+layout). On glibc the name resolves through the SONAME, so the check passes
+in every glibc scenario above, including renamed and replaced names.
+Changing `LD_LIBRARY_PATH` in a running process, as `deferred.R` does, does
+not change musl's search path. A Java application
+embedding R through JRI is not affected: for this reason the JDK launcher
+built for musl sets `LD_LIBRARY_PATH` and re-executes itself
+(`RequiresSetenv` in OpenJDK's `java_md.c`), and attaching checks no names.
+
 ## Selected libraries are not unloaded
 
 `.junloadJVM()` errors whenever a JVM library is loaded, even before a VM was
@@ -215,6 +246,7 @@ distribution with `sh mkdist`, installs it in an isolated library, and runs:
 | `hosted replaced` | the same replacement after a host created the VM (Windows: renamed in a copy of A's home, as above): `.jloadJVM()` rejects B, the replaced name and the name `RgetMappedJVM` reports, all before `.jinit()` attaches to A |
 | `decoy` | the JDK's `jli` library (JNI exports on macOS, no `JVM_` exports) is not reported and does not block selecting B |
 | `nonascii` | loading through such a path without a preload |
+| `byname` | musl, with A's server directory on the startup library path: selecting B is refused before a VM exists, A's library is not mapped, and the B library that musl keeps mapped then blocks A |
 | `fallback` | invalid `JAVA_HOME` warns and falls back to an independently computed home (HKCU registry entry on Windows, `java_home` on macOS, `java` on PATH on Linux) |
 | `laterload` | the later native loads above |
 | `hosted`, `hosted explicit` | native code creates a JVM, then `.jinit()` attaches to it although `JAVA_HOME` names the other JDK; `.jloadJVM()` rejects B, and with `explicit` selects A's own file first |
@@ -224,9 +256,12 @@ distribution with `sh mkdist`, installs it in an isolated library, and runs:
 | `msvc.R` | Windows normal/missing/2015 system runtimes, retained references, fresh startup and hosted late loads; loaded runtime origins |
 | `overlay.R` | actual 5.15, 6.1.0 and 6.8 kernels; four overlay layouts, unprivileged processes, exact refusal classes |
 | downstream | rJavaEnv and two minimal consumer packages (current pair only) |
+| `xlsx.R`, xlsx check | the CRAN package xlsx, whose `.onLoad()` starts Java through `.jpackage()`: loading it selects `JAVA_HOME` (JDK B, not the build JDK on `PATH`), another runtime is then rejected, and a workbook round trip works; `R CMD check` of the CRAN source package runs its testthat suite (current pair only) |
+| `musl.sh` | the Linux scenarios above, `byname` and `jri.R` on Alpine, each scenario with the server directory of the runtime it starts on the startup library path |
 
-Bounded matrix, each on Linux, macOS (arm64) and Windows with R release; the
-build JDK is Temurin 17:
+Bounded matrix, each on Linux (x86_64 and arm64), macOS (arm64) and Windows
+with R release; the build JDK is Temurin 17. On Linux arm64, JDK 8 has the
+`jre/lib/aarch64/server` layout:
 
 | Set | JDK A | JDK B |
 |---|---|---|
@@ -235,7 +270,21 @@ build JDK is Temurin 17:
 | vendor | Corretto 11 | Zulu 25 |
 
 An additional Windows R 4.5 job runs the same native, JRI and VC++ checks
-with Temurin 17/21, including the console declarations for R before 4.6.
+with Temurin 17/21, including the console declarations for R before 4.6. An
+Ubuntu 24.04 job runs the native and JRI checks with R 3.6.3, the oldest R
+that `DESCRIPTION` accepts, and Temurin 17/21.
+
+The musl jobs run `musl.sh` in Docker from a pinned `alpine:3.24.2` image:
+musl 1.2.6, Alpine's R 4.6.0 and its OpenJDK packages. Their libraries must
+link `libc.musl`, not a glibc compatibility layer. The JDKs are installed in
+the container's overlayfs root on the runner's current kernel, as in a
+typical Docker deployment:
+
+| Set | Machine | JDK A | JDK B |
+|---|---|---|---|
+| legacy | x86_64 | OpenJDK 8 | OpenJDK 11 |
+| current | x86_64 | OpenJDK 17 | OpenJDK 21 |
+| current | aarch64 | OpenJDK 17 | OpenJDK 21 |
 
 The upstream `check.yaml` matrix (R devel, Zulu 8 and 11, five runner images
 including Intel macOS) also runs on this branch.
@@ -269,10 +318,17 @@ from the repository root, one process per scenario.
   reuse on the current Ubuntu 5.15 and current-kernel guests. dyld
   records a library loaded through a symbolic link by its target, so on
   macOS the `symlink` variant shows the target name.
-- Not covered: 32-bit Windows, Windows on ARM, Linux on ARM, musl, OpenJ9 and
-  other non-HotSpot VMs, Java runtimes without a JDK layout, R versions other
-  than current release, Windows 4.5 and devel in `check.yaml`, and downstream packages
-  beyond the two test consumers.
+- On musl, a process can start only the runtime whose server directory was on
+  `LD_LIBRARY_PATH` when it started (above). Other runtimes are refused, not
+  supported.
+- Not covered: 32-bit Windows; Windows on ARM (the linkage, JRI and VC++
+  fixtures assume x64, and the old VC++ runtime test downloads x64 DLLs);
+  OpenJ9 and other non-HotSpot VMs, which the export-based identification
+  above does not describe; Java runtimes without a JDK layout; musl JDKs
+  other than Alpine's packages (e.g. Temurin's Alpine builds), and JDK 8 on
+  musl arm64; Intel macOS in this matrix (only in `check.yaml`); R versions
+  other than release, Windows 4.5, Linux 3.6.3 and devel in `check.yaml`;
+  and downstream packages beyond rJavaEnv, the two test consumers and xlsx.
 
 Modifying a mapped JVM library in place without changing its device/inode is
 outside the identity guarantee, as for other native libraries. Replace runtime
