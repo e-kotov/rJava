@@ -1,6 +1,6 @@
 /* Dynamic JNI
    Allows to load JVM dynamically into a process.
-   
+
    (C)2024 Simon Urbanek <simon.urbanek@R-project.org>
    License: LGPL-2.1 or MIT
 */
