@@ -357,6 +357,73 @@ switch(scenario,
       }
     }
   },
+  race = {
+    # Linux, with tests-integration/dlrace.c preloaded: another thread may
+    # unmap any library, Java or not, once dl_iterate_phdr() returns. The
+    # fixture unmaps an unrelated library right then (raced), or maps and
+    # unmaps it on another thread while discovery runs (churned), which
+    # exercises the race but cannot prove its absence.
+    fixture <- Sys.getenv("RJE_DLRACE")
+    victim <- Sys.getenv("RJE_DLRACE_VICTIM")
+    stopifnot(file.exists(fixture), file.exists(victim),
+              grepl(fixture, Sys.getenv("LD_PRELOAD"), fixed = TRUE))
+    dyn.load(fixture)
+    counts <- function() .C("dlrace_counts", hits = 0L, unmapped = 0L, armed = 0L)
+    raced <- function(expr) {
+      before <- counts()
+      .C("dlrace_arm", victim)
+      value <- expr
+      after <- counts()
+      stopifnot(after$armed == 0L, after$hits == before$hits + 1L, after$unmapped == before$unmapped + 1L)
+      invisible(value)
+    }
+    churned <- function(check, cycles = 20000L) {
+      stopifnot(.C("dlrace_churn", victim, cycles, result = 0L)$result == 0L)
+      calls <- 0L
+      repeat {
+        status <- .C("dlrace_churn_status", running = 0L, done = 0L, unmapped = 0L)
+        if (!status$running) break
+        check()
+        calls <- calls + 1L
+      }
+      log("discovery ran", calls, "times while another thread mapped and unmapped",
+          victim, status$done, "times, unmapped after", status$unmapped)
+      stopifnot(status$done == cycles, status$unmapped == cycles, calls > 0L)
+    }
+    attach <- function() .Call(internal("RattachJVM"))
+    one_jvm <- function() {
+      maps <- sub("^(\\S+\\s+){5}", "", grep("^(\\S+\\s+){5}/", readLines("/proc/self/maps"), value = TRUE))
+      jvms <- unique(maps[basename(maps) == "libjvm.so"])
+      if (length(jvms) != 1L) stop("expected one JVM library mapped, found: ", paste(jvms, collapse = ", "))
+    }
+    stopifnot(is.null(raced(mapped_jvm())))
+    churned(function() stopifnot(is.null(mapped_jvm())))
+    raced(fails(attach(), "No JVM library is mapped"))
+    # A JVM mapped outside rJava, without and then with a created VM.
+    path <- lib(home_a)
+    helper <- Sys.getenv("RJE_JVMHOST")
+    stopifnot(file.exists(helper))
+    dyn.load(helper)
+    preload(path)
+    raced(expect_mapped(path, 0L))
+    churned(function() stopifnot(identical(mapped_jvm()$vms, 0L)))
+    raced(fails(attach(), "created no VM"))
+    raced(fails(internal(".jloadJVM")(lib(home_b)), "already mapped"))
+    unmapped(home_b)
+    boot <- file.path(system.file("java", package = "rJava"), "boot")
+    stopifnot(.C("rjava_test_create_jvm", path, paste0("-Djava.class.path=", boot), result = 0L)$result == 0L)
+    raced(expect_mapped(path, 1L))
+    churned(function() stopifnot(identical(mapped_jvm()$vms, 1L)))
+    Sys.setenv(JAVA_HOME = home_b)
+    raced(fails(rJava::.jloadJVM(lib(home_b)), "already mapped"))
+    unmapped(home_b)
+    # .jinit() attaches to the created VM, through the same discovery.
+    raced(start(home_a))
+    stopifnot(state()$state == "attached")
+    churned(function() stopifnot(identical(mapped_jvm()$vms, 1L)), 5000L)
+    unmapped(home_b)
+    one_jvm()
+  },
   decoy = {
     # The Java launcher library (jli) has JNI exports on macOS that forward to
     # libjvm, but is no JVM: it must neither be reported nor block selection.

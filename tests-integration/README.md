@@ -44,7 +44,16 @@ memory (located through its `PT_DYNAMIC` segment and hash table, as the
 dynamic loader reads it), on Windows from the export table in memory. On
 macOS, `dlsym()` on a `RTLD_NOLOAD` handle must return an address inside the
 image. On Linux, an image whose table cannot be read inside its own readable
-segments makes discovery fail, rather than being taken for no JVM. JNI
+segments makes discovery fail, rather than being taken for no JVM. Every
+image, Java or not, is read only inside the `dl_iterate_phdr` callback:
+glibc holds its loader lock until `dl_iterate_phdr` returns, and `dlclose`
+unmaps an image only while holding it (`elf/dl-iteratephdr.c`,
+`elf/dl-close.c`), so another thread may unmap any image right after. Only
+the JVM images are kept: their name, their dynamic section and first segment
+as addresses that are compared but not read, and their
+`JNI_GetCreatedJavaVMs`, called only while a reference taken afterwards
+(below) holds the image mapped. musl never unmaps an image (its `dlclose`
+only checks the handle), so there the function is called without one. JNI
 exports alone do not suffice:
 rJava's own wrappers have them, and so does the macOS `libjli`, which
 forwards them to libjvm. Every HotSpot JDK in the matrix exports the three
@@ -280,6 +289,7 @@ distribution with `sh mkdist`, installs it in an isolated library, and runs:
 | `fallback` | invalid `JAVA_HOME` warns and falls back to an independently computed home (HKCU registry entry on Windows, `java_home` on macOS, `java` on PATH on Linux) |
 | `laterload` | the later native loads above |
 | `hosted`, `hosted explicit` | native code creates a JVM, then `.jinit()` attaches to it although `JAVA_HOME` names the other JDK; `.jloadJVM()` rejects B, and with `explicit` selects A's own file first |
+| `race` | Linux, with `dlrace.c` preloaded to interpose `dl_iterate_phdr`: an unrelated library is mapped before rJava lists the images and unmapped right after (deterministic), and mapped and unmapped 20000 times on another thread while discovery runs repeatedly (stress, which cannot prove the absence of a race): with nothing mapped, a preloaded A, and a VM a host created from it, discovery reports A with 0 and 1 VMs, B is refused and not mapped, attaching fails without a VM, and `.jinit()` attaches, with one `libjvm.so` mapped at the end. Not run on musl, which never unmaps a library |
 | every scenario | before anything is mapped, `RgetMappedJVM` is `NULL`: rJava's own JNI wrappers are not taken for a JVM |
 | `jengine`, `jri.R` | JRI started from R; a Java host embedding R, where `.jloadJVM()` rejects the `JAVA_HOME` runtime and rJava attaches to the host JVM (all three platforms, both host JDKs) |
 | `dll-search.c` | Windows DLL search state after failed and successful loads |
@@ -348,6 +358,12 @@ from the repository root, one process per scenario.
   reuse on the current Ubuntu 5.15 and current-kernel guests. dyld
   records a library loaded through a symbolic link by its target, so on
   macOS the `symlink` variant shows the target name.
+- On Linux, a reference to a JVM image is taken after `dl_iterate_phdr`
+  returns. It is the image's own only by comparing its dynamic section
+  address (`RTLD_DI_LINKMAP`), so an image unloaded meanwhile and another
+  loaded under its name with its dynamic section at that same address would
+  be taken for it. On macOS, `_dyld_get_image_name` can race with a
+  concurrent unload, a window of the dyld API that djni does not close.
 - On musl, a process can start only the runtime whose server directory was on
   `LD_LIBRARY_PATH` when it started (above). Other runtimes are refused, not
   supported, and the refused library stays mapped, so retrying in the same

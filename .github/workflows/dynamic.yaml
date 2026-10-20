@@ -159,6 +159,23 @@ jobs:
           run replaced deleted
           run replaced replaced
           run hosted replaced
+      - name: Unmap an unrelated library while mapped JVM discovery runs
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/dlrace"
+          mkdir -p "$dir"
+          # R's own flags show few warnings; the changed native code is checked with more.
+          cc="$(R CMD config CC)"
+          echo "::group::Warnings of src/djni.c with -Wall -Wextra"
+          $cc -O2 -Wall -Wextra -Isrc -c -o "$dir/djni.o" src/djni.c 2>&1 | tee "$dir/djni-warnings.txt"
+          echo "$(grep -c 'warning:' "$dir/djni-warnings.txt" || true) warnings"
+          echo "::endgroup::"
+          $cc -shared -fPIC -O2 -Wall -Wextra -Werror -o "$dir/dlrace.so" tests-integration/dlrace.c -ldl -lpthread
+          $cc -shared -fPIC -O2 -Wall -Wextra -Werror -DDLRACE_VICTIM -o "$dir/dlrace-victim.so" tests-integration/dlrace.c
+          LD_PRELOAD="$dir/dlrace.so" RJE_DLRACE="$dir/dlrace.so" RJE_DLRACE_VICTIM="$dir/dlrace-victim.so" \
+            Rscript --vanilla tests-integration/deferred.R race
       - name: Remove hard links left in the JDK directories
         if: always() && env.RJE_JAVA_HOME_A != ''
         shell: bash

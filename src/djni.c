@@ -530,115 +530,38 @@ static int is_jvm_name(const char *name) {
     base = base ? base + 1 : name;
     return !strcmp(base, "libjvm.dylib") || !strcmp(base, "libjvm.so");
 }
-/* An image mapped into the process: its name as the dynamic loader records
-   it, and where it is mapped, to tell its own definitions from those of its
-   dependencies (macOS) or to read its dynamic symbol table (Linux). */
-struct image {
-    char *name;
-#ifdef __APPLE__
-    const void *header;
-#else
-    size_t nseg;
-    uintptr_t *seg; /* start and end of each readable PT_LOAD segment */
 #ifdef __linux__
+/* An image as dl_iterate_phdr() reports it. Its memory is read only while
+   the callback runs: glibc holds its loader lock until dl_iterate_phdr()
+   returns, and dlclose() unmaps an image only while holding that lock
+   (elf/dl-iteratephdr.c, elf/dl-close.c), so any image, Java or not, may be
+   unmapped right after. musl never unmaps an image. */
+struct elf {
     uintptr_t base;
+    const ElfW(Phdr) *phdr;
+    size_t phnum;
     const ElfW(Dyn) *dyn;
-#endif
-#endif
 };
-struct images { struct image *v; size_t n, size; int failed; };
-static struct image *add_image(struct images *l, const char *name) {
-    struct image *im;
-    if (l->n == l->size) {
-        size_t size = l->size ? 2 * l->size : 64;
-        struct image *v = realloc(l->v, size * sizeof(*v));
-        if (!v) { l->failed = 1; return NULL; }
-        l->v = v;
-        l->size = size;
-    }
-    im = &l->v[l->n];
-    memset(im, 0, sizeof(*im));
-    if (!(im->name = strdup(name))) { l->failed = 1; return NULL; }
-    l->n++;
-    return im;
-}
-#ifdef __linux__
-/* Only records images: dlopen() must not be called from this callback. */
-static int phdr_image(struct dl_phdr_info *info, size_t size, void *data) {
-    struct images *l = (struct images *) data;
-    struct image *im;
-    size_t i, n = 0;
-    if (!info->dlpi_name || !*info->dlpi_name) return 0; /* the executable */
-    if (!(im = add_image(l, info->dlpi_name))) return 1;
-    im->base = (uintptr_t) info->dlpi_addr;
-    for (i = 0; i < info->dlpi_phnum; i++) {
-        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
-        if (ph->p_type == PT_LOAD && (ph->p_flags & PF_R)) n++;
-        if (ph->p_type == PT_DYNAMIC) im->dyn = (const ElfW(Dyn) *) (im->base + (uintptr_t) ph->p_vaddr);
-    }
-    if (n && !(im->seg = malloc(2 * n * sizeof(uintptr_t)))) { l->failed = 1; return 1; }
-    for (i = 0; i < info->dlpi_phnum; i++)
-        if (info->dlpi_phdr[i].p_type == PT_LOAD && (info->dlpi_phdr[i].p_flags & PF_R)) {
-            uintptr_t start = im->base + (uintptr_t) info->dlpi_phdr[i].p_vaddr;
-            im->seg[2 * im->nseg] = start;
-            im->seg[2 * im->nseg++ + 1] = start + (uintptr_t) info->dlpi_phdr[i].p_memsz;
-        }
-    return 0;
-}
-#endif
-static void free_images(struct images *l) {
-    size_t i;
-    for (i = 0; i < l->n; i++) {
-        free(l->v[i].name);
-#ifndef __APPLE__
-        free(l->v[i].seg);
-#endif
-    }
-    free(l->v);
-}
-/* Returns 0, or -1 if the images cannot be listed. Other systems list none. */
-static int list_images(struct images *l) {
-#ifdef __APPLE__
-    uint32_t i, n = _dyld_image_count();
-    for (i = 0; i < n; i++) {
-        const char *name = _dyld_get_image_name(i);
-        const struct mach_header *header = _dyld_get_image_header(i);
-        struct image *im;
-        if (!name || !header) continue;
-        if (!(im = add_image(l, name))) break;
-        im->header = header;
-    }
-#elif defined(__linux__)
-    dl_iterate_phdr(phdr_image, l);
-#endif
-    return l->failed ? -1 : 0;
-}
-#ifdef __APPLE__
-/* Whether the image defines sym itself: dlsym() on its handle also finds
-   definitions it inherits from the libraries it depends on. */
-static int owns(void *handle, const struct image *im, const char *sym) {
-    void *p = dlsym(handle, sym);
-    Dl_info info;
-    return p && dladdr(p, &info) && info.dli_fbase == im->header;
-}
-#elif defined(__linux__)
 /* Whether [a, a + len) lies in one readable segment of the image. */
-static int in_image(const struct image *im, uintptr_t a, size_t len) {
+static int in_image(const struct elf *im, uintptr_t a, size_t len) {
     size_t i;
-    for (i = 0; i < im->nseg; i++)
-        if (a >= im->seg[2 * i] && a < im->seg[2 * i + 1] && len <= im->seg[2 * i + 1] - a) return 1;
+    for (i = 0; i < im->phnum; i++) {
+        const ElfW(Phdr) *ph = &im->phdr[i];
+        uintptr_t start = im->base + (uintptr_t) ph->p_vaddr, end = start + (uintptr_t) ph->p_memsz;
+        if (ph->p_type == PT_LOAD && (ph->p_flags & PF_R) && a >= start && a < end && len <= end - a) return 1;
+    }
     return 0;
 }
 /* glibc relocates the addresses of a dynamic section in place on most
    targets, musl never does: an address is used only if it is in the image. */
-static uintptr_t dyn_addr(const struct image *im, uintptr_t v) {
+static uintptr_t dyn_addr(const struct elf *im, uintptr_t v) {
     if (in_image(im, v, 1)) return v;
     if (in_image(im, im->base + v, 1)) return im->base + v;
     return 0;
 }
 /* The number of entries in the dynamic symbol table, from its hash table as
    musl counts them (ldso/dynlink.c), or -1 if the table cannot be read. */
-static long count_syms(const struct image *im, const uint32_t *hash, const uint32_t *gnu) {
+static long count_syms(const struct elf *im, const uint32_t *hash, const uint32_t *gnu) {
     const uint32_t *buckets, *chain;
     uint32_t i, max = 0;
     if (!gnu) return in_image(im, (uintptr_t) hash, 2 * sizeof(*hash)) ? (long) hash[1] : -1;
@@ -660,7 +583,7 @@ static long count_syms(const struct image *im, const uint32_t *hash, const uint3
    handle: musl takes one by opening the recorded name again, which may since
    name another file or none. Returns 1 if defined, setting *fn to its
    address if it is a function, 0 if not, -1 if the table cannot be read. */
-static int image_symbol(const struct image *im, const char *sym, uintptr_t *fn) {
+static int image_symbol(const struct elf *im, const char *sym, uintptr_t *fn) {
     const ElfW(Dyn) *d = im->dyn;
     const ElfW(Sym) *syms;
     const char *strs;
@@ -699,6 +622,108 @@ static int image_symbol(const struct image *im, const char *sym, uintptr_t *fn) 
     }
     return 0;
 }
+#endif
+/* An image mapped into the process: its name as the dynamic loader records
+   it, and where it is mapped, to tell its own definitions from those of its
+   dependencies (macOS). On Linux, only JVM images are listed, with what
+   phdr_image() read of them: their dynamic section, which identifies them
+   but is not read again, their first readable segment and their
+   JNI_GetCreatedJavaVMs. */
+struct image {
+    char *name;
+#ifdef __APPLE__
+    const void *header;
+#elif defined(__linux__)
+    const ElfW(Dyn) *dyn;
+    uintptr_t addr, created;
+#endif
+};
+struct images { struct image *v; size_t n, size; int failed; };
+static struct image *add_image(struct images *l, const char *name) {
+    struct image *im;
+    if (l->n == l->size) {
+        size_t size = l->size ? 2 * l->size : 64;
+        struct image *v = realloc(l->v, size * sizeof(*v));
+        if (!v) { l->failed = 1; return NULL; }
+        l->v = v;
+        l->size = size;
+    }
+    im = &l->v[l->n];
+    memset(im, 0, sizeof(*im));
+    if (!(im->name = strdup(name))) { l->failed = 1; return NULL; }
+    l->n++;
+    return im;
+}
+#ifdef __linux__
+/* Records the JVM images, read only while dl_iterate_phdr() runs (struct
+   elf). An image is identified by its exports, not by a handle, which musl
+   may be unable to take; an unreadable table is not taken as no JVM. Only
+   reads memory: dlopen() must not be called from this callback. */
+static int phdr_image(struct dl_phdr_info *info, size_t size, void *data) {
+    struct images *l = (struct images *) data;
+    struct elf e = { (uintptr_t) info->dlpi_addr, info->dlpi_phdr, info->dlpi_phnum, NULL };
+    struct image *im;
+    uintptr_t fn, addr = 0, created = 0;
+    size_t i;
+    int jvm, owned;
+    if (!info->dlpi_name || !*info->dlpi_name) return 0; /* the executable */
+    for (i = 0; i < e.phnum; i++) {
+        const ElfW(Phdr) *ph = &e.phdr[i];
+        if (ph->p_type == PT_LOAD && (ph->p_flags & PF_R) && !addr) addr = e.base + (uintptr_t) ph->p_vaddr;
+        if (ph->p_type == PT_DYNAMIC) e.dyn = (const ElfW(Dyn) *) (e.base + (uintptr_t) ph->p_vaddr);
+    }
+    jvm = is_jvm_name(info->dlpi_name);
+    owned = image_symbol(&e, "JVM_CurrentTimeMillis", &fn);
+    if (owned > 0) owned = image_symbol(&e, "JNI_CreateJavaVM", &fn);
+    if (owned > 0 || jvm) {
+        int found = image_symbol(&e, "JNI_GetCreatedJavaVMs", &fn);
+        if (owned > 0) owned = found;
+        if (found > 0) created = fn;
+    }
+    if (owned < 0 && !jvm) {
+        snprintf(last_error, sizeof(last_error), "Cannot read the exports of %s, mapped into this process", info->dlpi_name);
+        l->failed = 2;
+        return 1;
+    }
+    if (!jvm && owned <= 0) return 0;
+    if (!(im = add_image(l, info->dlpi_name))) return 1;
+    im->dyn = e.dyn;
+    im->addr = addr;
+    im->created = created;
+    return 0;
+}
+#endif
+static void free_images(struct images *l) {
+    size_t i;
+    for (i = 0; i < l->n; i++) free(l->v[i].name);
+    free(l->v);
+}
+/* Returns 0, or -1 if the images cannot be listed. Other systems list none. */
+static int list_images(struct images *l) {
+#ifdef __APPLE__
+    uint32_t i, n = _dyld_image_count();
+    for (i = 0; i < n; i++) {
+        const char *name = _dyld_get_image_name(i);
+        const struct mach_header *header = _dyld_get_image_header(i);
+        struct image *im;
+        if (!name || !header) continue;
+        if (!(im = add_image(l, name))) break;
+        im->header = header;
+    }
+#elif defined(__linux__)
+    dl_iterate_phdr(phdr_image, l);
+#endif
+    return l->failed ? -1 : 0;
+}
+#ifdef __APPLE__
+/* Whether the image defines sym itself: dlsym() on its handle also finds
+   definitions it inherits from the libraries it depends on. */
+static int owns(void *handle, const struct image *im, const char *sym) {
+    void *p = dlsym(handle, sym);
+    Dl_info info;
+    return p && dladdr(p, &info) && info.dli_fbase == im->header;
+}
+#elif defined(__linux__)
 /* A reference to the image by name, if the name opens it without loading
    anything. musl matches a name with a slash by the file now there, which
    may be another mapped library, so the handle must be the image's own. */
@@ -738,7 +763,9 @@ static void free_jvms(struct jvm_image *v, int n) {
    exports and a JVM_ export, whatever its name. JNI exports alone do not
    suffice: the macOS libjli defines them to forward to libjvm. Returns the
    number of JVM images, or -1 with last_error set if the images cannot be
-   listed, or (Linux) the exports of one cannot be read. */
+   listed, or (Linux) the exports of one cannot be read. On Linux, the JVM
+   images were identified by phdr_image(), and their functions are called
+   only through a reference that holds them mapped (created_vms()). */
 static int find_jvms(struct jvm_image **out) {
     struct images l = { NULL, 0, 0, 0 };
     struct jvm_image *v = NULL;
@@ -746,7 +773,7 @@ static int find_jvms(struct jvm_image **out) {
     int n = 0;
     *out = NULL;
     if (list_images(&l) || (l.n && !(v = calloc(l.n, sizeof(*v))))) {
-        snprintf(last_error, sizeof(last_error), "Cannot list the libraries mapped into this process");
+        if (l.failed != 2) snprintf(last_error, sizeof(last_error), "Cannot list the libraries mapped into this process");
         free_images(&l);
         free(v);
         return -1;
@@ -765,35 +792,20 @@ static int find_jvms(struct jvm_image **out) {
         if (jvm && handle && owns(handle, im, "JNI_GetCreatedJavaVMs"))
             *(void **) &v[n].created = dlsym(handle, "JNI_GetCreatedJavaVMs");
 #elif defined(__linux__)
-        /* Identified by its exports, not by a handle, which musl may be
-           unable to take; an unreadable table is not taken as no JVM. */
-        uintptr_t fn;
-        int owned = image_symbol(im, "JVM_CurrentTimeMillis", &fn);
-        if (owned > 0) owned = image_symbol(im, "JNI_CreateJavaVM", &fn);
-        if (owned > 0 || jvm) {
-            int created = image_symbol(im, "JNI_GetCreatedJavaVMs", &fn);
-            if (owned > 0) owned = created;
-            if (created > 0) v[n].created = (JNI_GetCreatedJavaVMs_fnptr) fn;
-        }
-        if (owned < 0 && !jvm) {
-            snprintf(last_error, sizeof(last_error), "Cannot read the exports of %s, mapped into this process", im->name);
-            free_jvms(v, n);
-            free_images(&l);
-            return -1;
-        }
-        jvm = jvm || owned > 0;
-        /* The recorded name, or the name the JDK's libraries bind to. */
-        if (jvm && !(handle = reference(im->dyn, im->name)))
-            handle = reference(im->dyn, "libjvm.so");
+        /* Only JVM images are listed. The recorded name, or the name the
+           JDK's libraries bind to. */
+        jvm = 1;
+        if (!(handle = reference(im->dyn, im->name))) handle = reference(im->dyn, "libjvm.so");
         v[n].dyn = im->dyn;
+        v[n].created = (JNI_GetCreatedJavaVMs_fnptr) im->created;
 #endif
         if (jvm) {
             v[n].name = im->name;
             im->name = NULL;
 #ifdef __APPLE__
             v[n].addr = im->header;
-#else
-            v[n].addr = im->nseg ? (const void *) im->seg[0] : NULL;
+#elif defined(__linux__)
+            v[n].addr = (const void *) im->addr;
 #endif
             v[n++].handle = handle;
         } else if (handle)
@@ -804,10 +816,17 @@ static int find_jvms(struct jvm_image **out) {
     *out = v;
     return n;
 }
-/* The number of VMs created by a JVM image, or -1 if unknown. */
+/* The number of VMs created by a JVM image, or -1 if unknown. Its function
+   is called only while a reference holds the image mapped. musl, the Linux
+   C library assumed when neither glibc nor bionic is, never unmaps an image
+   (its dlclose() only checks the handle), so an address read while listing
+   the images stays valid without one. */
 static int created_vms(const struct jvm_image *im) {
     JavaVM *vm;
     jsize count = 0;
+#if !defined(__linux__) || defined(__GLIBC__) || defined(__BIONIC__)
+    if (!im->handle) return -1;
+#endif
     return im->created && im->created(&vm, 1, &count) == JNI_OK ? (int) count : -1;
 }
 static void use_new_process(void) {
@@ -873,10 +892,10 @@ static int attach_library(void) {
     else if (n > 1)
         snprintf(last_error, sizeof(last_error), "%d JVM libraries are already mapped, including %s. Use a new R process.",
                  n, jvms[0].name);
-    else if (created_vms(&jvms[0]) <= 0)
-        snprintf(last_error, sizeof(last_error), "The JVM library mapped into this process has created no VM: %s.", jvms[0].name);
     else if (!jvms[0].handle)
         snprintf(last_error, sizeof(last_error), "Cannot reference the JVM library mapped into this process: %s. Use a new R process.", jvms[0].name);
+    else if (created_vms(&jvms[0]) <= 0)
+        snprintf(last_error, sizeof(last_error), "The JVM library mapped into this process has created no VM: %s.", jvms[0].name);
     else {
         jni_dl = jvms[0].handle;
         jvms[0].handle = NULL;
