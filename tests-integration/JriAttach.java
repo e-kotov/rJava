@@ -22,10 +22,13 @@ public class JriAttach {
         /* An explicit path must name the mapped file: JAVA_HOME's runtime is rejected. */
         REXP result = engine.eval("tryCatch({" +
             " library(rJava);" +
-            " b <- try(.jloadJVM(rJava:::.find.jvm.library(Sys.getenv('JAVA_HOME'))[1]), silent = TRUE);" +
+            " p <- rJava:::.find.jvm.library(Sys.getenv('JAVA_HOME'))[1];" +
+            " b <- try(.jloadJVM(p), silent = TRUE);" +
+            " maps <- if (file.exists('/proc/self/maps')) unique(grep('libjvm', readLines('/proc/self/maps'), value = TRUE)) else '';" +
             " if (!inherits(b, 'try-error') || .jvmState()$state != 'not-loaded')" +
-            "   stop('JAVA_HOME runtime was selected: ', if (inherits(b, 'try-error')) trimws(b) else 'loaded'," +
-            "        '; state ', .jvmState()$state, '; mapped ', paste(unlist(.Call(rJava:::RgetMappedJVM)), collapse = ' '));" +
+            "   stop('JAVA_HOME runtime was selected: ', p, ': ', if (inherits(b, 'try-error')) trimws(b) else 'loaded'," +
+            "        '; state ', .jvmState()$state, '; mapped ', paste(unlist(.Call(rJava:::RgetMappedJVM)), collapse = ' ')," +
+            "        '; maps ', paste(maps, collapse = ' | '));" +
             " .jinit();" +
             " paste('OK', .jvmState()$state, .jcall('java/lang/System', 'S', 'getProperty', 'java.home')," +
             "   !is.jnull(.jengine()), sep = '|')" +
