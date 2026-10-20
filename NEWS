@@ -1,6 +1,35 @@
  NEWS/ChangeLog for rJava
 --------------------------
 
+1.0-19	(not yet released)
+    o	The JVM run-time is no longer linked into rJava or loaded when
+	the namespace loads. The first .jinit() selects one: a JVM
+	already created in the process, then java.home (Windows) or
+	JAVA_HOME, the JavaSoft registry (Windows),
+	/usr/libexec/java_home (macOS), and java on PATH. Until a
+	library is loaded, a failed .jinit() can be retried after
+	correcting the setting. .jloadJVM() selects a library by path;
+	.jvmState() reports "not-loaded" before any selection.
+
+    o	A selected JVM library stays selected for the life of the R
+	process: .junloadJVM() fails once one is loaded, and another
+	run-time requires a new R process. A JVM library already mapped
+	into the process is selected only by a path naming the same
+	file; any other is refused before it is loaded.
+
+    o	If native code in the process (e.g. a Java application that
+	embeds R through JRI) has created a VM, .jinit() attaches to it
+	whatever JAVA_HOME names.
+
+    o	Changed behavior: the Java home is now chosen when Java is
+	first used, not when rJava loads, and .onLoad() no longer changes
+	PATH (Windows) or DYLD_LIBRARY_PATH (macOS). On Linux with musl
+	(e.g. Alpine), only the run-time whose server directory was on
+	LD_LIBRARY_PATH when R started can be used; selecting another
+	is refused, and the refused library stays mapped, so a new R
+	process is needed (see ?.jinit).
+
+
 1.0-18	2026-04-08
     o	JRI: fix regression in 1.0-16 breaking older versions of R.
 

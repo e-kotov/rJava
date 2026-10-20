@@ -37,9 +37,15 @@ macOS, `EnumProcessModules` on Windows), without loading anything. An image
 is a JVM library if it has a JVM library name (`libjvm.so`, `libjvm.dylib`,
 `jvm.dll`), even if malformed, or whatever its name if it defines itself
 `JNI_CreateJavaVM`, `JNI_GetCreatedJavaVMs` and `JVM_CurrentTimeMillis`.
-"Defines itself" excludes definitions inherited from a dependency
-(the symbol address lies outside the image) and forwarded Windows exports
-(read from the export table in memory). JNI exports alone do not suffice:
+"Defines itself" excludes definitions inherited from a dependency and
+forwarded Windows exports. The exports are read without a handle where a
+handle may be unavailable: on Linux from the image's dynamic symbol table in
+memory (located through its `PT_DYNAMIC` segment and hash table, as the
+dynamic loader reads it), on Windows from the export table in memory. On
+macOS, `dlsym()` on a `RTLD_NOLOAD` handle must return an address inside the
+image. On Linux, an image whose table cannot be read inside its own readable
+segments makes discovery fail, rather than being taken for no JVM. JNI
+exports alone do not suffice:
 rJava's own wrappers have them, and so does the macOS `libjli`, which
 forwards them to libjvm. Every HotSpot JDK in the matrix exports the three
 symbols; CI checks this for each runtime.
@@ -74,9 +80,10 @@ even the one `RgetMappedJVM` reports for a created VM, since the file now
 at that name may be another runtime. `.jinit()` instead attaches through
 the internal `RattachJVM`, which takes no path: it requires exactly one
 mapped JVM image, with at least one created VM, and selects that image
-through the reference djni holds to it, without loading anything. So it
-attaches even if the file at the image's recorded name was deleted or
-replaced, or cannot be identified (overlayfs, below). It never selects an
+through a reference to it, without loading anything. So it attaches even if
+the file at the image's recorded name was deleted or replaced, or cannot be
+identified (overlayfs, below), as long as a reference can be taken (below
+for musl). It never selects an
 image without a created VM, never resolves an ambiguity between several
 images, and fails if the image lacks a JNI entry point. On Windows it does
 not apply the `jvm.dll` name rule, which concerns starting a VM (untested:
@@ -115,14 +122,27 @@ built for musl sets `LD_LIBRARY_PATH` and re-executes itself
 (`RequiresSetenv` in OpenJDK's `java_md.c`), and attaching checks no names.
 
 musl also resolves `dlopen(name, RTLD_NOLOAD)` for a path by opening that
-file. djni references a mapped image, and reads the exports of one whose name
-no JVM uses, through that call. So on musl a JVM library mapped under such a
-name is no longer identified as a JVM once that file is deleted or replaced.
-In `replaced deleted` on Alpine, `.jloadJVM()` of B then mapped B's library,
-and only the name check refused it, before any VM was created. The
-`replaced` and `hosted replaced` scenarios are therefore not run on musl. A
-library under the name `libjvm.so` is identified by that name; deleting or
-replacing it is not exercised on musl.
+file and matching its device and inode (`load_library` in musl's
+`ldso/dynlink.c`). A recorded name whose file was deleted or replaced then
+yields no reference, or one to another mapped library. Earlier, djni read the
+exports of an image through that reference, so on musl a JVM library mapped
+under a name no JVM uses was no longer identified once its file was deleted or
+replaced: in `replaced deleted` with B's server directory on the startup
+library path, `.jloadJVM()` of B mapped B's library next to A's and succeeded,
+as the name check then found B; with A's there, the name check refused B, but
+only after mapping it. Now the exports are read from memory (above), so the
+image is still identified and B is refused before anything is loaded. A
+reference is taken only through a name the dynamic loader resolves to the
+image itself, verified with `dlinfo(RTLD_DI_LINKMAP)` against the image's
+dynamic section: its recorded name, then `libjvm.so` (the name the JDK's
+libraries bind to), and for `.jloadJVM()` the path given, which must name the
+mapped file. If none resolves to the image, selecting or attaching it is
+refused (`Cannot reference the JVM library ...`) before a VM is created. The
+`replaced` scenarios run on musl with A's and with B's server directory on
+the startup library path, and check that nothing from B's home is mapped
+after the refusals; with B's, A is refused too, by the name check.
+`hosted replaced` runs with A's only: with B's, the host's own VM would bind
+A's JDK libraries to B's `libjvm.so` before rJava is involved.
 
 ## Selected libraries are not unloaded
 
@@ -252,8 +272,8 @@ distribution with `sh mkdist`, installs it in an isolated library, and runs:
 | `alias link/spelling/short` | the same preloaded library through a symbolic link or junction with spaces and non-ASCII characters, an alternative spelling, and an 8.3 name (Windows) |
 | `renamed copy/hardlink/symlink` | a JVM library mapped under a name no JVM uses: a copy of B rejects A and B's own library; a hard link of A in its directory (and a symbolic link, Linux and macOS) rejects B, then the same file starts A (Windows: is rejected as mapped under another name) |
 | `hosted renamed` | native code creates the VM from the hard link; it is reported with one VM, B is rejected, and `.jinit()` attaches (Linux and macOS) |
-| `replaced deleted/replaced` | the file of the mapped library is deleted, or replaced by a hard link of B's (Windows: a mapped DLL cannot be deleted, so it is renamed in a copy of A's home and B's linked as `jvm.dll`): B, the replaced name and `.jinit()` with `JAVA_HOME` naming B are rejected, A's own file is accepted, and after replacement A starts |
-| `hosted replaced` | the same replacement after a host created the VM (Windows: renamed in a copy of A's home, as above): `.jloadJVM()` rejects B, the replaced name and the name `RgetMappedJVM` reports, all before `.jinit()` attaches to A |
+| `replaced deleted/replaced` | the file of the mapped library is deleted, or replaced by a hard link of B's (Windows: a mapped DLL cannot be deleted, so it is renamed in a copy of A's home and B's linked as `jvm.dll`): B, the replaced name and `.jinit()` with `JAVA_HOME` naming B are rejected, and on Linux nothing from B's home is then mapped; A's own file is accepted, and after replacement A starts (musl with B's server directory on the startup library path: A is refused by the name check instead, and B is still not mapped) |
+| `hosted replaced` | the same replacement after a host created the VM (Windows: renamed in a copy of A's home, as above): `.jloadJVM()` rejects B, the replaced name and the name `RgetMappedJVM` reports, nothing from B's home is mapped (Linux), all before `.jinit()` attaches to A |
 | `decoy` | the JDK's `jli` library (JNI exports on macOS, no `JVM_` exports) is not reported and does not block selecting B |
 | `nonascii` | loading through such a path without a preload |
 | `byname` | musl, with A's server directory on the startup library path: selecting B is refused before a VM exists, A's library is not mapped, and the B library that musl keeps mapped then blocks A |
@@ -267,7 +287,7 @@ distribution with `sh mkdist`, installs it in an isolated library, and runs:
 | `overlay.R` | actual 5.15, 6.1.0 and 6.8 kernels; four overlay layouts, unprivileged processes, exact refusal classes |
 | downstream | rJavaEnv and two minimal consumer packages (current pair only) |
 | `xlsx.R`, xlsx check | the CRAN package xlsx, whose `.onLoad()` starts Java through `.jpackage()`: loading it selects `JAVA_HOME` (JDK B, not the build JDK on `PATH`), another runtime is then rejected, and a workbook round trip works; `R CMD check` of the CRAN source package runs its testthat suite (current pair only) |
-| `musl.sh` | the Linux scenarios above, `byname` and `jri.R` on Alpine, each scenario with the server directory of the runtime it starts on the startup library path |
+| `musl.sh` | the Linux scenarios above, `byname` and `jri.R` on Alpine, each scenario with the server directory of the runtime it starts on the startup library path; `replaced deleted/replaced` also with B's, `hosted replaced` with A's only (above) |
 
 Bounded matrix, each on Linux (x86_64 and arm64), macOS (arm64) and Windows
 with R release; the build JDK is Temurin 17. On Linux arm64, JDK 8 has the
@@ -330,8 +350,11 @@ from the repository root, one process per scenario.
   macOS the `symlink` variant shows the target name.
 - On musl, a process can start only the runtime whose server directory was on
   `LD_LIBRARY_PATH` when it started (above). Other runtimes are refused, not
-  supported. A JVM library mapped under a name no JVM uses is not identified
-  on musl once its file is deleted or replaced.
+  supported, and the refused library stays mapped, so retrying in the same
+  process with another runtime is refused too: start a new R process. A JVM
+  library mapped under a name that no longer opens it is identified, but can
+  be selected or attached only through a name that still resolves to it
+  (above); otherwise rJava refuses it.
 - Not covered: 32-bit Windows; Windows on ARM (the linkage, JRI and VC++
   fixtures assume x64, and the old VC++ runtime test downloads x64 DLLs);
   OpenJ9 and other non-HotSpot VMs, which the export-based identification
