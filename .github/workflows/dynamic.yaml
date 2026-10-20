@@ -232,7 +232,9 @@ jobs:
           Rscript -e 'lib <- file.path(Sys.getenv("RUNNER_TEMP"), "xlsx-lib")
             install.packages(c("xlsxjars", "testthat", "rprojroot", "tibble", "knitr"), lib = lib)
             stopifnot(!dir.exists(file.path(lib, "rJava")))
-            src <- download.packages("xlsx", file.path(Sys.getenv("RUNNER_TEMP"), "xlsx-src"), type = "source")[, 2]
+            # The source package from CRAN: the P3M Linux repositories serve binaries.
+            src <- download.packages("xlsx", file.path(Sys.getenv("RUNNER_TEMP"), "xlsx-src"),
+                                     repos = "https://cloud.r-project.org", type = "source")[, 2]
             install.packages(src, lib = lib, repos = NULL, type = "source")
             stopifnot(dir.exists(file.path(lib, "xlsx")))'
           {

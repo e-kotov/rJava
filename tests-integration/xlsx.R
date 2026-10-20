@@ -19,7 +19,7 @@ state <- function() get(".jvmState", ns)()
 stopifnot(identical(state()$state, "not-loaded"), exists("RgetMappedJVM", ns))
 # JDK B, so that the build JDK (A in the current set) cannot be picked up by accident.
 Sys.setenv(JAVA_HOME = home_b)
-loadNamespace("xlsx")
+invisible(loadNamespace("xlsx"))
 stopifnot(state()$initialized)
 actual <- normalizePath(rJava::.jcall("java/lang/System", "S", "getProperty", "java.home"), winslash = "/")
 expected <- normalizePath(home_b, winslash = "/")

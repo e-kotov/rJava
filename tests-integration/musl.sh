@@ -64,8 +64,9 @@ R CMD INSTALL --library=/work/lib /work/rJava_*.tar.gz
 export R_LIBS=/work/lib
 
 lib="$(Rscript --vanilla -e 'cat(system.file("libs", package="rJava"))')"
-ldd "$lib/rJava.so"
-if ldd "$lib/rJava.so" | grep -i libjvm; then echo "::error::rJava.so depends on libjvm"; exit 1; fi
+# musl's ldd also resolves symbols, and R's symbols come from the executable.
+readelf -d "$lib/rJava.so" | grep NEEDED
+if readelf -d "$lib/rJava.so" | grep NEEDED | grep -i libjvm; then echo "::error::rJava.so depends on libjvm"; exit 1; fi
 
 Rscript --vanilla tests-integration/jni-abi.R "$RJE_JAVA_HOME_A" "$RJE_JAVA_HOME_B"
 cp tests-integration/jvmhost.c /work/jvmhost/
