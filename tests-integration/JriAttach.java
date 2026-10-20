@@ -23,7 +23,9 @@ public class JriAttach {
         REXP result = engine.eval("tryCatch({" +
             " library(rJava);" +
             " b <- try(.jloadJVM(rJava:::.find.jvm.library(Sys.getenv('JAVA_HOME'))[1]), silent = TRUE);" +
-            " if (!inherits(b, 'try-error') || .jvmState()$state != 'not-loaded') stop('JAVA_HOME runtime was selected');" +
+            " if (!inherits(b, 'try-error') || .jvmState()$state != 'not-loaded')" +
+            "   stop('JAVA_HOME runtime was selected: ', if (inherits(b, 'try-error')) trimws(b) else 'loaded'," +
+            "        '; state ', .jvmState()$state, '; mapped ', paste(unlist(.Call(rJava:::RgetMappedJVM)), collapse = ' '));" +
             " .jinit();" +
             " paste('OK', .jvmState()$state, .jcall('java/lang/System', 'S', 'getProperty', 'java.home')," +
             "   !is.jnull(.jengine()), sep = '|')" +
