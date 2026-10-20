@@ -833,13 +833,11 @@ int djni_load(const char *path) {
     last_error[0] = 0;
     if (jni_dl) return -1;
     if ((res = load_library(path))) return res;
-#ifdef __linux__
-    if ((res = check_jvm_name(path))) {
-        djni_unload();
-        return res;
-    }
-#endif
     res = load_syms();
+#ifdef __linux__
+    /* After load_syms(), so that a library that is no JVM is reported as such. */
+    if (!res && (res = check_jvm_name(path))) djni_unload();
+#endif
 #ifdef _WIN32
     if (!res) load_bundled_msvc();
 #endif
