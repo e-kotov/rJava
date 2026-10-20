@@ -227,16 +227,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/xlsx-lib" "$RUNNER_TEMP/xlsx-src"
-          # rJava is already on R_LIBS, so it is not installed as a dependency.
-          Rscript -e 'lib <- file.path(Sys.getenv("RUNNER_TEMP"), "xlsx-lib")
-            install.packages(c("xlsxjars", "testthat", "rprojroot", "tibble", "knitr"), lib = lib)
-            stopifnot(!dir.exists(file.path(lib, "rJava")))
-            # The source package from CRAN: the P3M Linux repositories serve binaries.
-            src <- download.packages("xlsx", file.path(Sys.getenv("RUNNER_TEMP"), "xlsx-src"),
-                                     repos = "https://cloud.r-project.org", type = "source")[, 2]
-            install.packages(src, lib = lib, repos = NULL, type = "source")
-            stopifnot(dir.exists(file.path(lib, "xlsx")))'
+          Rscript tests-integration/xlsx-install.R "$RUNNER_TEMP/xlsx-lib" "$RUNNER_TEMP/xlsx-src"
           {
             echo "RJE_RJAVA_LIB=$R_LIBS"
             echo "R_LIBS=$R_LIBS${{ runner.os == 'Windows' && ';' || ':' }}$RUNNER_TEMP/xlsx-lib"

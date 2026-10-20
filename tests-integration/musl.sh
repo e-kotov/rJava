@@ -73,24 +73,42 @@ cp tests-integration/jvmhost.c /work/jvmhost/
 (cd /work/jvmhost && PKG_CPPFLAGS="-I/work/rJava/src" R CMD SHLIB jvmhost.c)
 export RJE_JVMHOST=/work/jvmhost/jvmhost.so
 
-# The scenarios of dynamic.yaml that apply to Linux.
-run() { echo "::group::$*"; Rscript --vanilla tests-integration/deferred.R "$@"; echo "::endgroup::"; }
-for scenario in select retry badinput unload preloaded nonascii fallback laterload hosted decoy; do
-  run "$scenario"
-done
-run hosted explicit
-run jengine
-run preloaded global
-run laterload b
-run alias link
-run alias spelling
-run renamed copy
-run renamed hardlink
-run renamed symlink
-run hosted renamed
-run replaced deleted
-run replaced replaced
-run hosted replaced
+# musl resolves the JDK libraries' dependency on libjvm.so through
+# LD_LIBRARY_PATH as set at process start, not by matching the loaded JVM
+# library's SONAME as glibc does. R's etc/ldpaths puts R_JAVA_LD_LIBRARY_PATH
+# (default: the server directory of the R CMD javareconf JDK) on it.
+echo "::group::Startup library path"
+grep -n JAVA /usr/lib/R/etc/ldpaths
+Rscript --vanilla -e 'cat("LD_LIBRARY_PATH:", Sys.getenv("LD_LIBRARY_PATH"), "\n")'
+echo "::endgroup::"
+server() { dirname "$(find "$1/" -name libjvm.so -path '*/server/*' -print -quit)"; }
+server_a="$(server "$RJE_JAVA_HOME_A")"
+server_b="$(server "$RJE_JAVA_HOME_B")"
+# The scenarios of dynamic.yaml that apply to Linux, each with the server
+# directory of the runtime it starts (A or B) on the startup library path.
+run() {
+  local jdk="$1"; shift
+  local dir="$server_a"; [[ "$jdk" == B ]] && dir="$server_b"
+  echo "::group::$* ($jdk on LD_LIBRARY_PATH)"
+  R_JAVA_LD_LIBRARY_PATH="$dir" Rscript --vanilla tests-integration/deferred.R "$@"
+  echo "::endgroup::"
+}
+for scenario in select retry badinput nonascii fallback decoy; do run B "$scenario"; done
+for scenario in unload preloaded laterload hosted jengine; do run A "$scenario"; done
+run A hosted explicit
+run A preloaded global
+run B laterload b
+run A alias link
+run A alias spelling
+run B renamed copy
+run A renamed hardlink
+run A renamed symlink
+run A hosted renamed
+run A replaced deleted
+run A replaced replaced
+run A hosted replaced
+# The library path names A's runtime, B is selected: refused before a VM exists.
+run A byname
 
 echo "::group::JRI host"
 Rscript --vanilla tests-integration/jri.R

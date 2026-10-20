@@ -343,6 +343,20 @@ switch(scenario,
     Sys.setenv(JAVA_HOME = home_b)
     start(home_b)
   },
+  byname = {
+    # musl resolves the libjvm.so dependency of the JDK's libraries through
+    # LD_LIBRARY_PATH as set at process start, which the job points at A's.
+    # Selecting B is refused before a VM exists, so no second JVM library is
+    # mapped; musl never unmaps B's, which then blocks selecting A.
+    stopifnot(Sys.info()[["sysname"]] == "Linux")
+    Sys.setenv(JAVA_HOME = home_b)
+    fails(rJava::.jinit(), "libjvm.so by name")
+    maps <- grep("/libjvm[.]so$", readLines("/proc/self/maps"), value = TRUE)
+    maps <- unique(sub("^\\S+\\s+\\S+\\s+\\S+\\s+\\S+\\s+\\S+\\s+", "", maps))
+    log("mapped JVM files:", maps)
+    stopifnot(length(maps) <= 1L, !lib(home_a) %in% maps)
+    if (length(maps)) fails(internal(".jloadJVM")(lib(home_a)), "already mapped")
+  },
   nonascii = {
     # No preload: the loader itself must open a path with spaces and non-ASCII names.
     Sys.setenv(JAVA_HOME = link_home(home_b))
