@@ -802,13 +802,43 @@ static int load_syms(void) {
     return 0;
 }
 
+#ifdef __linux__
+/* The JDK's own libraries (libjava, libjimage, ...) depend on libjvm.so by
+   name, with only their own directory as run path. glibc matches that name
+   to the loaded JVM library by its SONAME. musl matches it only to a library
+   it found by searching: LD_LIBRARY_PATH as set when the process started,
+   then its system path. A JVM library selected by path is then not found,
+   or another file is, and starting a VM would map a second JVM library.
+   Resolving the name without loading anything shows what they will get. */
+static int check_jvm_name(const char *path) {
+    void *named = dlopen("libjvm.so", RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
+    const char *slash = strrchr(path, '/');
+    int dir = slash ? (int) (slash - path) : 1;
+    if (named) dlclose(named);
+    dlerror();
+    if (named == jni_dl) return 0;
+    snprintf(last_error, sizeof(last_error),
+             "The JDK's libraries load libjvm.so by name, which in this process does not resolve to %s. "
+             "With musl, put %.*s on LD_LIBRARY_PATH before R starts, e.g. with R_JAVA_LD_LIBRARY_PATH. Use a new R process.",
+             path, dir, slash ? path : ".");
+    return -4;
+}
+#endif
+
 /* returns: 0 = success, -1 = already loaded, -2 = load error, -3 = symbols
-   not found, -4 = another JVM library is already mapped */
+   not found, -4 = another JVM library is already mapped, or (Linux) the
+   JDK's libraries would not bind to the selected one */
 int djni_load(const char *path) {
     int res;
     last_error[0] = 0;
     if (jni_dl) return -1;
     if ((res = load_library(path))) return res;
+#ifdef __linux__
+    if ((res = check_jvm_name(path))) {
+        djni_unload();
+        return res;
+    }
+#endif
     res = load_syms();
 #ifdef _WIN32
     if (!res) load_bundled_msvc();
