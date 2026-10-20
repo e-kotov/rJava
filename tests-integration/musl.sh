@@ -104,9 +104,9 @@ run B renamed copy
 run A renamed hardlink
 run A renamed symlink
 run A hosted renamed
-run A replaced deleted
-run A replaced replaced
-run A hosted replaced
+# Not replaced deleted, replaced replaced or hosted replaced: musl references
+# a mapped image by reopening its recorded name, so a JVM library under a name
+# no JVM uses is not identified once that file is deleted or replaced (README).
 # The library path names A's runtime, B is selected: refused before a VM exists.
 run A byname
 

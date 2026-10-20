@@ -114,6 +114,16 @@ embedding R through JRI is not affected: for this reason the JDK launcher
 built for musl sets `LD_LIBRARY_PATH` and re-executes itself
 (`RequiresSetenv` in OpenJDK's `java_md.c`), and attaching checks no names.
 
+musl also resolves `dlopen(name, RTLD_NOLOAD)` for a path by opening that
+file. djni references a mapped image, and reads the exports of one whose name
+no JVM uses, through that call. So on musl a JVM library mapped under such a
+name is no longer identified as a JVM once that file is deleted or replaced.
+In `replaced deleted` on Alpine, `.jloadJVM()` of B then mapped B's library,
+and only the name check refused it, before any VM was created. The
+`replaced` and `hosted replaced` scenarios are therefore not run on musl. A
+library under the name `libjvm.so` is identified by that name; deleting or
+replacing it is not exercised on musl.
+
 ## Selected libraries are not unloaded
 
 `.junloadJVM()` errors whenever a JVM library is loaded, even before a VM was
@@ -320,7 +330,8 @@ from the repository root, one process per scenario.
   macOS the `symlink` variant shows the target name.
 - On musl, a process can start only the runtime whose server directory was on
   `LD_LIBRARY_PATH` when it started (above). Other runtimes are refused, not
-  supported.
+  supported. A JVM library mapped under a name no JVM uses is not identified
+  on musl once its file is deleted or replaced.
 - Not covered: 32-bit Windows; Windows on ARM (the linkage, JRI and VC++
   fixtures assume x64, and the old VC++ runtime test downloads x64 DLLs);
   OpenJ9 and other non-HotSpot VMs, which the export-based identification
