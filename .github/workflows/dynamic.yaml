@@ -23,7 +23,7 @@ jobs:
           - { set: vendor, a-dist: corretto, a-version: '11', b-dist: zulu, b-version: '25' }
           - { set: r45, os: windows-latest, r: '4.5', a-dist: temurin, a-version: '17', b-dist: temurin, b-version: '21' }
           # The oldest R that DESCRIPTION accepts.
-          - { set: r36, os: ubuntu-latest, r: '3.6', a-dist: temurin, a-version: '17', b-dist: temurin, b-version: '21' }
+          - { set: r36, os: ubuntu-24.04, r: '3.6', a-dist: temurin, a-version: '17', b-dist: temurin, b-version: '21' }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
@@ -232,7 +232,9 @@ jobs:
           Rscript -e 'lib <- file.path(Sys.getenv("RUNNER_TEMP"), "xlsx-lib")
             install.packages(c("xlsxjars", "testthat", "rprojroot", "tibble", "knitr"), lib = lib)
             stopifnot(!dir.exists(file.path(lib, "rJava")))
-            download.packages("xlsx", file.path(Sys.getenv("RUNNER_TEMP"), "xlsx-src"), type = "source")'
+            src <- download.packages("xlsx", file.path(Sys.getenv("RUNNER_TEMP"), "xlsx-src"), type = "source")[, 2]
+            install.packages(src, lib = lib, repos = NULL, type = "source")
+            stopifnot(dir.exists(file.path(lib, "xlsx")))'
           {
             echo "RJE_RJAVA_LIB=$R_LIBS"
             echo "R_LIBS=$R_LIBS${{ runner.os == 'Windows' && ';' || ':' }}$RUNNER_TEMP/xlsx-lib"

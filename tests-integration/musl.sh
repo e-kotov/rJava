@@ -34,7 +34,12 @@ uname -srm
 R --version | head -n 1
 # The container root is normally overlayfs on the runner's kernel.
 stat -f -c 'JDK filesystem: %T' "$RJE_JAVA_HOME_A"
-# deferred.R reduces PATH to /usr/bin:/bin, which must not provide a java.
+# deferred.R reduces PATH to /usr/bin:/bin so that a system java cannot mask
+# discovery. Alpine's java-common links /usr/bin/java to the default JVM;
+# remove that link in this disposable container, as the hosted jobs do not
+# have one either.
+ls -l /usr/bin/java /usr/lib/jvm/default-jvm 2>&1 || true
+rm -f /usr/bin/java
 if [[ -e /usr/bin/java || -e /bin/java ]]; then echo "::error::java on the reduced PATH would mask discovery"; exit 1; fi
 echo "::endgroup::"
 
