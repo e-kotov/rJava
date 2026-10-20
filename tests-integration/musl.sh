@@ -112,5 +112,5 @@ run A byname
 
 echo "::group::JRI host"
 Rscript --vanilla tests-integration/jri.R
-RJE_JAVA_HOME_A="$RJE_JAVA_HOME_B" RJE_JAVA_HOME_B="$RJE_JAVA_HOME_A" Rscript --vanilla tests-integration/jri.R
+env RJE_JAVA_HOME_A="$RJE_JAVA_HOME_B" RJE_JAVA_HOME_B="$RJE_JAVA_HOME_A" Rscript --vanilla tests-integration/jri.R
 echo "::endgroup::"
