@@ -277,66 +277,89 @@ static int created_vms(HMODULE module) {
     created = (JNI_GetCreatedJavaVMs_fnptr) GetProcAddress(module, "JNI_GetCreatedJavaVMs");
     return created && created(&vm, 1, &count) == JNI_OK ? (int) count : -1;
 }
-/* Keep already loaded runtimes alive; otherwise prefer the selected JDK's
-   own set, as java.exe does. Only a missing bundled copy falls back to
-   System32. References last until process exit, without changing PATH or
-   retaining a DLL search directory. Optional load failures are diagnosed. */
-static void load_bundled_msvc(void) {
+/* File versions let an up-to-date system runtime take precedence over an
+   older JDK copy. Unknown versions are not evidence that the JDK is newer. */
+static ULONGLONG dll_version(const wchar_t *path) {
+    DWORD ignored, size = GetFileVersionInfoSizeW(path, &ignored);
+    VS_FIXEDFILEINFO *info;
+    UINT len;
+    ULONGLONG version = 0;
+    void *data = size ? malloc(size) : NULL;
+    if (data && GetFileVersionInfoW(path, 0, size, data) &&
+        VerQueryValueW(data, L"\\", (void **) &info, &len) &&
+        len >= sizeof(*info) && info->dwSignature == 0xfeef04bd)
+        version = ((ULONGLONG) info->dwFileVersionMS << 32) | info->dwFileVersionLS;
+    free(data);
+    return version;
+}
+/* Retain loaded runtimes without replacing a host's choice. For each DLL
+   the JDK bundles, otherwise select the newer of it and System32, preferring
+   System32 on a tie or unknown version. Do this before jvm.dll binds imports.
+   Unbundled, unloaded runtimes remain the loader's responsibility. References
+   last until process exit, without changing PATH or DLL search directories. */
+static void retain_msvc(const wchar_t *bin) {
     static const wchar_t *names[] = {
         L"vcruntime140.dll", L"vcruntime140_1.dll", L"msvcp140.dll",
         L"msvcp140_1.dll", L"msvcp140_2.dll", L"msvcp140_atomic_wait.dll"
     };
     static HMODULE retained[sizeof(names) / sizeof(names[0])];
-    wchar_t *path = module_path(jni_dl), *slash, *candidate;
-    size_t i, len;
+    wchar_t system[MAX_PATH + 64], *bundled;
+    UINT slen = GetSystemDirectoryW(system, MAX_PATH);
+    size_t i, blen = wcslen(bin);
+    if (!slen || slen >= MAX_PATH || !(bundled = malloc(sizeof(wchar_t) * (blen + 64)))) {
+        fprintf(stderr, "rJava: cannot prepare MSVC runtime paths.\n");
+        return;
+    }
+    wcscpy(bundled, bin);
+    bundled[blen] = L'\\';
+    system[slen] = L'\\';
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        const wchar_t *choice;
+        DWORD attrs, error;
+        char *name;
+        if (retained[i]) continue;
+        /* Own a reference even if the original loader later releases its DLL. */
+        if (GetModuleHandleExW(0, names[i], &retained[i])) continue;
+        wcscpy(bundled + blen + 1, names[i]);
+        wcscpy(system + slen + 1, names[i]);
+        attrs = GetFileAttributesW(bundled);
+        if (attrs == INVALID_FILE_ATTRIBUTES) {
+            error = GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) continue;
+            name = to_utf8(bundled);
+            fprintf(stderr, "rJava: cannot inspect bundled MSVC runtime %s (Windows error %lu).\n",
+                    name ? name : "(unknown path)", (unsigned long) error);
+            free(name);
+            continue;
+        }
+        choice = bundled;
+        if (GetFileAttributesW(system) != INVALID_FILE_ATTRIBUTES) {
+            ULONGLONG vb = dll_version(bundled), vs = dll_version(system);
+            if (!vb || !vs || vs >= vb) choice = system;
+        }
+        retained[i] = LoadLibraryExW(choice, NULL,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (retained[i]) continue;
+        error = GetLastError();
+        name = to_utf8(choice);
+        fprintf(stderr, "rJava: cannot retain MSVC runtime %s (Windows error %lu); later Java native loads may fail.\n",
+                name ? name : "(unknown path)", (unsigned long) error);
+        free(name);
+    }
+    free(bundled);
+}
+static void load_bundled_msvc(void) {
+    wchar_t *path = module_path(jni_dl), *slash;
     if (!path) {
         fprintf(stderr, "rJava: cannot determine the selected JVM's MSVC runtime directory (Windows error %lu).\n", (unsigned long) GetLastError());
         return;
     }
     slash = wcsrchr(path, L'\\');
-    if (!slash) { free(path); return; }
-    *slash = 0; /* bin\server */
-    slash = wcsrchr(path, L'\\');
-    if (!slash) { free(path); return; }
-    *slash = 0; /* bin */
-    len = wcslen(path);
-    candidate = malloc(sizeof(wchar_t) * (len + 64));
-    if (candidate) {
-        for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-            DWORD attrs, error;
-            char *name;
-            if (retained[i]) continue;
-            /* Unlike GetModuleHandleW, this owns a reference even if the
-               component that originally loaded the runtime is unloaded. */
-            if (GetModuleHandleExW(0, names[i], &retained[i])) continue;
-            wcscpy(candidate, path);
-            candidate[len] = L'\\';
-            wcscpy(candidate + len + 1, names[i]);
-            attrs = GetFileAttributesW(candidate);
-            error = attrs == INVALID_FILE_ATTRIBUTES ? GetLastError() : 0;
-            if (error && error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
-                name = to_utf8(candidate);
-                fprintf(stderr, "rJava: cannot inspect bundled MSVC runtime %s (Windows error %lu).\n",
-                        name ? name : "(unknown path)", (unsigned long) error);
-                free(name);
-                continue;
-            }
-            if (attrs != INVALID_FILE_ATTRIBUTES)
-                retained[i] = LoadLibraryExW(candidate, NULL,
-                    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-            else
-                retained[i] = LoadLibraryExW(names[i], NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
-            if (retained[i]) continue;
-            error = GetLastError();
-            /* A JDK need not use every optional runtime in the list. */
-            if (attrs == INVALID_FILE_ATTRIBUTES && error == ERROR_MOD_NOT_FOUND) continue;
-            name = to_utf8(attrs != INVALID_FILE_ATTRIBUTES ? candidate : names[i]);
-            fprintf(stderr, "rJava: cannot retain MSVC runtime %s (Windows error %lu); later Java native loads may fail.\n",
-                    name ? name : "(unknown path)", (unsigned long) error);
-            free(name);
-        }
-        free(candidate);
-    } else fprintf(stderr, "rJava: cannot prepare MSVC runtimes: out of memory.\n");
+    if (slash) {
+        *slash = 0; /* bin\\server */
+        slash = wcsrchr(path, L'\\');
+        if (slash) { *slash = 0; retain_msvc(path); }
+    }
     free(path);
 }
 static int load_library(const char *path) {
@@ -405,6 +428,7 @@ static int load_library(const char *path) {
             *slash = 0;
             if ((slash = wcsrchr(bin, L'\\'))) {
                 *slash = 0;
+                retain_msvc(bin);
                 cookie = AddDllDirectory(bin);
             }
         }
@@ -418,13 +442,12 @@ done:
     free(wide); free(full); free(bin);
     return res;
 }
-/* Takes a reference to the only mapped JVM module if it has created a VM.
-   The module's name is not checked: no VM is started, so the JDK's DLLs,
-   which import jvm.dll by name, are not loaded again. */
+/* Select the only mapped JVM module. An unstarted module must have its
+   usual name, since the JDK DLLs import jvm.dll by name when starting a VM. */
 static int attach_library(void) {
     struct jvm_image *jvms;
     char *name;
-    int n = find_jvms(&jvms), res = -4;
+    int n = find_jvms(&jvms), res = -4, count = -1;
     if (n < 0) {
         save_win_error("Cannot list the modules of", "this process", GetLastError());
         return -4;
@@ -435,8 +458,11 @@ static int attach_library(void) {
     else if (n > 1)
         snprintf(last_error, sizeof(last_error), "%d JVM libraries are already mapped, including %s. Use a new R process.",
                  n, name ? name : "unknown path");
-    else if (created_vms(jvms[0].handle) <= 0)
-        snprintf(last_error, sizeof(last_error), "The JVM library mapped into this process has created no VM: %s.",
+    else if ((count = created_vms(jvms[0].handle)) < 0)
+        snprintf(last_error, sizeof(last_error), "Cannot determine the VM count of the mapped JVM library: %s.",
+                 name ? name : "unknown path");
+    else if (!count && (!jvms[0].path || !is_jvm_name(jvms[0].path)))
+        snprintf(last_error, sizeof(last_error), "The JVM library is already mapped under another name: %s. Use a new R process.",
                  name ? name : "unknown path");
     else {
         jni_dl = jvms[0].handle;
@@ -902,13 +928,14 @@ static int load_library(const char *path) {
     free_jvms(jvms, n);
     return res;
 }
-/* Takes the reference held to the only mapped JVM image if it has created
-   a VM. Its recorded name is not interpreted: the file there may have been
-   deleted or replaced, and on overlayfs the mapped file may be unverifiable,
-   but the created VM is the image's own. */
+#ifdef __linux__
+static int check_jvm_name(const char *path);
+#endif
+/* Select the only mapped JVM image using a held reference, without opening
+   its recorded path: the file there may have been deleted or replaced. */
 static int attach_library(void) {
     struct jvm_image *jvms;
-    int n = find_jvms(&jvms), res = -4;
+    int n = find_jvms(&jvms), res = -4, count = -1;
     if (n < 0) {
         use_new_process();
         return -4;
@@ -920,12 +947,17 @@ static int attach_library(void) {
                  n, jvms[0].name);
     else if (!jvms[0].handle)
         snprintf(last_error, sizeof(last_error), "Cannot reference the JVM library mapped into this process: %s. Use a new R process.", jvms[0].name);
-    else if (created_vms(&jvms[0]) <= 0)
-        snprintf(last_error, sizeof(last_error), "The JVM library mapped into this process has created no VM: %s.", jvms[0].name);
+    else if ((count = created_vms(&jvms[0])) < 0)
+        snprintf(last_error, sizeof(last_error), "Cannot determine the VM count of the mapped JVM library: %s.", jvms[0].name);
     else {
         jni_dl = jvms[0].handle;
         jvms[0].handle = NULL;
         res = 0;
+#ifdef __linux__
+        /* Starting an unstarted JVM still requires its dependencies to bind
+           to this very image, including on musl and with renamed libraries. */
+        if (!count && (res = check_jvm_name(jvms[0].name))) djni_unload();
+#endif
     }
     free_jvms(jvms, n);
     return res;
@@ -1020,7 +1052,7 @@ int djni_load(const char *path) {
     return res;
 }
 /* returns: 0 = success, -1 = already loaded, -3 = symbols not found, -4 = no
-   single mapped JVM library with a created VM */
+   single verifiable mapped JVM library */
 int djni_attach(void) {
     int res;
     last_error[0] = 0;
