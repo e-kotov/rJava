@@ -16,11 +16,13 @@ sudo mount -o loop "$work/disk.img" "$mountpoint"
 trap 'sudo umount "$mountpoint"' EXIT
 sudo chown "$(id -u):$(id -g)" "$mountpoint"
 [[ "$(findmnt -n -o FSTYPE --target "$mountpoint")" == "$fs" ]]
-if [[ "$fs" == btrfs ]]; then btrfs subvolume create "$mountpoint/jdk-a"; else mkdir "$mountpoint/jdk-a"; fi
-mkdir "$mountpoint/jdk-b"
-cp -a "$RJE_JAVA_HOME_A/." "$mountpoint/jdk-a/"
-cp -a "$RJE_JAVA_HOME_B/." "$mountpoint/jdk-b/"
-export RJE_JAVA_HOME_A="$mountpoint/jdk-a" RJE_JAVA_HOME_B="$mountpoint/jdk-b"
+if [[ "$fs" == btrfs ]]; then btrfs subvolume create "$mountpoint/jdks"; else mkdir "$mountpoint/jdks"; fi
+# Replacement scenarios hard-link B into A's directory. Both homes must
+# share a subvolume; cross-subvolume identity is tested separately below.
+mkdir "$mountpoint/jdks/jdk-a" "$mountpoint/jdks/jdk-b"
+cp -a "$RJE_JAVA_HOME_A/." "$mountpoint/jdks/jdk-a/"
+cp -a "$RJE_JAVA_HOME_B/." "$mountpoint/jdks/jdk-b/"
+export RJE_JAVA_HOME_A="$mountpoint/jdks/jdk-a" RJE_JAVA_HOME_B="$mountpoint/jdks/jdk-b"
 lib_a="$RJE_JAVA_HOME_A/lib/server/libjvm.so"
 lib_b="$RJE_JAVA_HOME_B/lib/server/libjvm.so"
 stat -Lc 'file=%n device=%d inode=%i' "$lib_a" "$lib_b"
@@ -34,9 +36,10 @@ if [[ "$fs" == btrfs ]]; then old_mode=old-btrfs; fi
 if [[ "$fs" == btrfs ]]; then
   # Distinct subvolumes can have the same inode numbers. Equal inodes alone
   # must not select a different subvolume's file, even with identical bytes.
-  btrfs subvolume snapshot "$RJE_JAVA_HOME_A" "$mountpoint/jdk-shadow"
-  stat -Lc 'snapshot=%n device=%d inode=%i' "$mountpoint/jdk-shadow/lib/server/libjvm.so"
-  "$work/identity" "$lib_a" "$mountpoint/jdk-shadow/lib/server/libjvm.so" current
+  btrfs subvolume snapshot "$mountpoint/jdks" "$mountpoint/jdk-shadow"
+  shadow="$mountpoint/jdk-shadow/jdk-a/lib/server/libjvm.so"
+  stat -Lc 'snapshot=%n device=%d inode=%i' "$shadow"
+  "$work/identity" "$lib_a" "$shadow" current
 fi
 run() { echo "::group::$fs $*"; Rscript --vanilla tests-integration/deferred.R "$@"; echo '::endgroup::'; }
 for scenario in select preloaded; do run "$scenario"; done
