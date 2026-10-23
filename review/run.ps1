@@ -47,7 +47,7 @@ foreach ($jdk in $jdks.PSObject.Properties.Name) {
 }
 # Missing system runtimes: the case the candidate's MSVC retention cures.
 $hidden = @()
-try {
+if (!$env:REVIEW_SKIP_MISSING) { try {
     foreach ($n in $names) {
         $p = Join-Path $system $n
         if (Test-Path $p) {
@@ -59,7 +59,7 @@ try {
     foreach ($jdk in $jdks.PSObject.Properties.Name) {
         foreach ($build in 'master', 'candidate', 'fix') { Probe $jdk $build 'missing-workload' 'missing' }
     }
-} finally { foreach ($p in $hidden) { Rename-Item "$p.review-hidden" (Split-Path $p -Leaf) } }
+} finally { foreach ($p in $hidden) { Rename-Item "$p.review-hidden" (Split-Path $p -Leaf) } } }
 
 $rows | Format-Table -AutoSize | Out-String -Width 200 | Write-Output
 $rows | Export-Csv -NoTypeInformation (Join-Path $work 'results.csv')
