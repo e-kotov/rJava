@@ -92,6 +92,52 @@ The fork-only workflows run on the testing branch and by manual dispatch.
 They deliberately check out this fork's pinned rJavaEnv consumer; neither the
 branch filters nor the consumer checkout is proposed upstream.
 
+## Windows enhancement necessity experiment
+
+Dispatch `dynamic.yaml` with `windows_comparison=true` to run only the
+controlled Windows comparison, without rerunning the general matrix. Six
+workers cover release R and R 4.5 with Temurin 8/21 and Zulu 25. Every worker
+builds four source variants in isolated libraries:
+
+- Upstream master at `534ff33` (also the upstream candidate's base).
+- The unchanged candidate at `fdbe195`.
+- The candidate plus only the MSVC retention function and its two call sites
+  from `cd6bbe5`.
+- The candidate plus only the Windows JRI build changes from `cd6bbe5`.
+
+The master, candidate and MSVC-only builds run identical public rJava calls
+in fresh R processes and after a native host creates Java. The workload uses
+compression, loopback networking, SHA-256, JVM management, the Windows
+certificate store, AWT drawing and PNG encoding. It verifies the selected
+Java home and records loaded JVM/MSVC module paths before and after Java.
+Java directories are absent from PATH.
+
+Each workload runs with the hosted system's VC++ DLLs, with the named VC++
+DLLs absent from System32, and with the original Microsoft VC++ 2015 Update 3
+DLLs in System32. The old payload is pinned by SHA256 and version; DLLs are
+restored in `finally`. All system changes happen only on disposable workers.
+This models deployment conditions but is not a clean Windows image or a
+measurement of how common those conditions are. R or another component may
+already load its own runtime: module origins are essential to interpretation.
+
+A master success / candidate failure is a regression to investigate. Shared
+failure cured by MSVC retention is evidence for broader compatibility, not
+evidence that deferred loading alone requires the enhancement. Shared success
+shows no need for the enhancement in that specific tested case.
+
+JRI tests compare bundling with a Java application supplying its own JRI
+dependency. The external-JRI host uses the same JRI-only native library/jar
+for each installed rJava variant; this isolates rJava attachment from JRI's
+build and tests coexistence with existing embedding applications. The bundled
+JRI positive control runs `.jengine(TRUE)`. With JDK 21, an intentionally bad
+JRI compiler flag also demonstrates whether enabling the build can turn an
+otherwise successful package install into a failure.
+
+Workload failures are experimental observations in CSV/JSON and logs, not
+silently skipped tests. Jobs fail on candidate-only regressions, unexpected
+normal-system failures, setup errors, or failed JRI positive controls. Worker
+summaries compare outcomes explicitly. PR #2's runtime sources are unchanged.
+
 ## Limits
 
 - musl can start only the JVM whose server directory was on
