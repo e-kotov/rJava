@@ -1,0 +1,62 @@
+name: Review - Windows MSVC runtime precedence
+on:
+  push:
+    branches: [claude/upbeat-edison-pdd0gd]
+  workflow_dispatch:
+jobs:
+  msvc:
+    name: Windows MSVC precedence (R ${{ matrix.r }})
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        r: [release]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.r }}
+          rtools-version: '45'
+      - { uses: actions/setup-java@v5, id: t8,  with: { distribution: temurin,   java-version: '8' } }
+      - { uses: actions/setup-java@v5, id: t11, with: { distribution: temurin,   java-version: '11' } }
+      - { uses: actions/setup-java@v5, id: t21, with: { distribution: temurin,   java-version: '21' } }
+      - { uses: actions/setup-java@v5, id: t25, with: { distribution: temurin,   java-version: '25' } }
+      - { uses: actions/setup-java@v5, id: z8,  with: { distribution: zulu,      java-version: '8' } }
+      - { uses: actions/setup-java@v5, id: m21, with: { distribution: microsoft, java-version: '21' } }
+      - { uses: actions/setup-java@v5, id: c17, with: { distribution: corretto,  java-version: '17' } }
+      - { uses: actions/setup-java@v5, id: t17, with: { distribution: temurin,   java-version: '17' } }
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build master, exact candidate and review variant
+        shell: bash
+        run: bash review/build.sh
+      - name: Build MSVC std::mutex probe
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'review/native'
+          cl 2>&1 | Select-Object -First 1
+          cl /nologo /LD /MD /EHsc /O2 review/mutex.cpp /Fe:"$out/mutex.dll" /Fo:"$out/"
+          if ($LASTEXITCODE) { throw 'cl failed' }
+          dumpbin /dependents "$out/mutex.dll" | Select-String -Pattern '\.dll'
+      - name: Compare runtime origins and std::mutex probe
+        shell: pwsh
+        env:
+          REVIEW_JDKS: >-
+            {"temurin8":"${{ steps.t8.outputs.path }}","temurin11":"${{ steps.t11.outputs.path }}",
+             "temurin17":"${{ steps.t17.outputs.path }}","temurin21":"${{ steps.t21.outputs.path }}",
+             "temurin25":"${{ steps.t25.outputs.path }}","zulu8":"${{ steps.z8.outputs.path }}",
+             "microsoft21":"${{ steps.m21.outputs.path }}","corretto17":"${{ steps.c17.outputs.path }}"}
+        run: |
+          $env:R_HOME_DIR = (Rscript --vanilla -e 'cat(R.home())')
+          $env:REVIEW_JDKS = $env:REVIEW_JDKS -replace '\\', '/'
+          ./review/run.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: review-msvc-${{ matrix.r }}
+          path: |
+            ${{ runner.temp }}/review/logs
+            ${{ runner.temp }}/review/results.csv

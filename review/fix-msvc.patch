@@ -1,0 +1,133 @@
+diff --git a/src/Makevars.win b/src/Makevars.win
+index 34b3aab..4c6cdb4 100644
+--- a/src/Makevars.win
++++ b/src/Makevars.win
+@@ -23,7 +23,7 @@ $(warning JAVA_HOME is $(JAVA_HOME))
+ # debugging flags like -DRJ_DEBUG or -DRJ_PROFILE to PKG_CFLAGS
+ JAVA_INCLUDES=$(JAVA_HOME)/include $(JAVA_HOME)/include/win32
+ PKG_CPPFLAGS = -D_R_ -DWin32 -Ijvm-w32 -I$(RHOME)/src/include $(JAVA_INCLUDES:%=-I%)
+-PKG_LIBS = -Ljvm-w32
++PKG_LIBS = -Ljvm-w32 -lversion
+ 
+ $(warning PKG_CPPFLAGS are $(PKG_CPPFLAGS))
+ 
+diff --git a/src/djni.c b/src/djni.c
+index 281f234..d52c330 100644
+--- a/src/djni.c
++++ b/src/djni.c
+@@ -277,66 +277,53 @@ static int created_vms(HMODULE module) {
+     created = (JNI_GetCreatedJavaVMs_fnptr) GetProcAddress(module, "JNI_GetCreatedJavaVMs");
+     return created && created(&vm, 1, &count) == JNI_OK ? (int) count : -1;
+ }
+-/* Keep already loaded runtimes alive; otherwise prefer the selected JDK's
+-   own set, as java.exe does. Only a missing bundled copy falls back to
+-   System32. References last until process exit, without changing PATH or
+-   retaining a DLL search directory. Optional load failures are diagnosed. */
+-static void load_bundled_msvc(void) {
++/* The file version of a DLL, or 0 if it has none. */
++static ULONGLONG dll_version(const wchar_t *path) {
++    DWORD ignored, size = GetFileVersionInfoSizeW(path, &ignored);
++    VS_FIXEDFILEINFO *info;
++    UINT len;
++    ULONGLONG v = 0;
++    void *data = size ? malloc(size) : NULL;
++    if (data && GetFileVersionInfoW(path, 0, size, data) &&
++        VerQueryValueW(data, L"\\", (void **) &info, &len) && len >= sizeof(*info))
++        v = ((ULONGLONG) info->dwFileVersionMS << 32) | info->dwFileVersionLS;
++    free(data);
++    return v;
++}
++/* REVIEW VARIANT: keep loaded runtimes; for each runtime the JDK bundles,
++   use the newer of the System32 and bundled copies (System32 on a tie), as
++   master's search order would for an up-to-date system. Runtimes the JDK
++   does not bundle are left to the loader. */
++static void retain_msvc(const wchar_t *bin) {
+     static const wchar_t *names[] = {
+         L"vcruntime140.dll", L"vcruntime140_1.dll", L"msvcp140.dll",
+         L"msvcp140_1.dll", L"msvcp140_2.dll", L"msvcp140_atomic_wait.dll"
+     };
+     static HMODULE retained[sizeof(names) / sizeof(names[0])];
+-    wchar_t *path = module_path(jni_dl), *slash, *candidate;
+-    size_t i, len;
+-    if (!path) {
+-        fprintf(stderr, "rJava: cannot determine the selected JVM's MSVC runtime directory (Windows error %lu).\n", (unsigned long) GetLastError());
+-        return;
++    wchar_t sys[MAX_PATH + 64], bundled[32768 + 64];
++    UINT slen = GetSystemDirectoryW(sys, MAX_PATH);
++    size_t i, blen = wcslen(bin);
++    if (!slen || slen >= MAX_PATH || blen > 32768) return;
++    for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
++        ULONGLONG vb, vs;
++        const wchar_t *choice;
++        if (retained[i]) continue;
++        if (GetModuleHandleExW(0, names[i], &retained[i])) continue;
++        wcscpy(bundled, bin); bundled[blen] = L'\\'; wcscpy(bundled + blen + 1, names[i]);
++        sys[slen] = L'\\'; wcscpy(sys + slen + 1, names[i]);
++        if (GetFileAttributesW(bundled) == INVALID_FILE_ATTRIBUTES) continue;
++        vb = dll_version(bundled);
++        vs = GetFileAttributesW(sys) == INVALID_FILE_ATTRIBUTES ? 0 : dll_version(sys);
++        choice = (vs && vs >= vb) ? sys : bundled;
++        retained[i] = LoadLibraryExW(choice, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
++        if (!retained[i])
++            fprintf(stderr, "rJava: cannot retain MSVC runtime (Windows error %lu)\n", (unsigned long) GetLastError());
+     }
+-    slash = wcsrchr(path, L'\\');
+-    if (!slash) { free(path); return; }
+-    *slash = 0; /* bin\server */
+-    slash = wcsrchr(path, L'\\');
+-    if (!slash) { free(path); return; }
+-    *slash = 0; /* bin */
+-    len = wcslen(path);
+-    candidate = malloc(sizeof(wchar_t) * (len + 64));
+-    if (candidate) {
+-        for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+-            DWORD attrs, error;
+-            char *name;
+-            if (retained[i]) continue;
+-            /* Unlike GetModuleHandleW, this owns a reference even if the
+-               component that originally loaded the runtime is unloaded. */
+-            if (GetModuleHandleExW(0, names[i], &retained[i])) continue;
+-            wcscpy(candidate, path);
+-            candidate[len] = L'\\';
+-            wcscpy(candidate + len + 1, names[i]);
+-            attrs = GetFileAttributesW(candidate);
+-            error = attrs == INVALID_FILE_ATTRIBUTES ? GetLastError() : 0;
+-            if (error && error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
+-                name = to_utf8(candidate);
+-                fprintf(stderr, "rJava: cannot inspect bundled MSVC runtime %s (Windows error %lu).\n",
+-                        name ? name : "(unknown path)", (unsigned long) error);
+-                free(name);
+-                continue;
+-            }
+-            if (attrs != INVALID_FILE_ATTRIBUTES)
+-                retained[i] = LoadLibraryExW(candidate, NULL,
+-                    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+-            else
+-                retained[i] = LoadLibraryExW(names[i], NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+-            if (retained[i]) continue;
+-            error = GetLastError();
+-            /* A JDK need not use every optional runtime in the list. */
+-            if (attrs == INVALID_FILE_ATTRIBUTES && error == ERROR_MOD_NOT_FOUND) continue;
+-            name = to_utf8(attrs != INVALID_FILE_ATTRIBUTES ? candidate : names[i]);
+-            fprintf(stderr, "rJava: cannot retain MSVC runtime %s (Windows error %lu); later Java native loads may fail.\n",
+-                    name ? name : "(unknown path)", (unsigned long) error);
+-            free(name);
+-        }
+-        free(candidate);
+-    } else fprintf(stderr, "rJava: cannot prepare MSVC runtimes: out of memory.\n");
++}
++static void load_bundled_msvc(void) {
++    wchar_t *path = module_path(jni_dl), *slash;
++    if (!path) return;
++    if ((slash = wcsrchr(path, L'\\'))) { *slash = 0; if ((slash = wcsrchr(path, L'\\'))) { *slash = 0; retain_msvc(path); } }
+     free(path);
+ }
+ static int load_library(const char *path) {
+@@ -406,6 +393,7 @@ static int load_library(const char *path) {
+             if ((slash = wcsrchr(bin, L'\\'))) {
+                 *slash = 0;
+                 cookie = AddDllDirectory(bin);
++                retain_msvc(bin); /* before jvm.dll binds its imports */
+             }
+         }
+     }
