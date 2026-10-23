@@ -5,11 +5,11 @@ on:
   workflow_dispatch:
     inputs:
       windows_comparison:
-        description: Compare master/candidate with isolated MSVC and JRI enhancements
+        description: Validate the combined candidate against Windows compatibility controls
         type: boolean
         default: false
 env:
-  UPSTREAM_CANDIDATE: fdbe195dc8e9a480345197eede0d0131a912eac5
+  UPSTREAM_CANDIDATE: c5834c8efa6c97239f9f922d5bdedd8e143cf30a
 jobs:
   dynamic:
     if: github.event_name != 'workflow_dispatch' || !inputs.windows_comparison
@@ -367,7 +367,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Build master, candidate, and isolated Windows enhancements
+      - name: Build combined candidate, master, and isolated Windows controls
         shell: bash
         run: bash tests-integration/windows-compare-build.sh
       - name: Compare startup, late native loads, host attachment and JRI

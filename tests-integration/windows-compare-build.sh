@@ -7,10 +7,11 @@ candidate=fdbe195dc8e9a480345197eede0d0131a912eac5
 master=534ff33499641619e3ca3ac7d573d953613d0102
 enhanced=cd6bbe5ef94172ac85e9c44ae8930d0ce4bf40b2
 mkdir -p "$work"/{sources,lib,logs,native,classes}
-for ref in "$candidate" "$master" "$enhanced"; do git cat-file -e "$ref^{commit}"; done
-for variant in master candidate msvc jri; do
+for ref in "$candidate" "$master" "$enhanced" "$UPSTREAM_CANDIDATE"; do git cat-file -e "$ref^{commit}"; done
+for variant in master candidate msvc current jri; do
   ref=$candidate
   if [[ "$variant" == master ]]; then ref=$master; fi
+  if [[ "$variant" == current ]]; then ref=$UPSTREAM_CANDIDATE; fi
   dir="$work/sources/$variant"
   mkdir -p "$dir" "$work/lib/$variant"
   git archive "$ref" | tar -x -C "$dir"
@@ -46,6 +47,14 @@ elif variant == 'msvc':
         part = part[:pos] + '#ifdef _WIN32\n    if (!res) load_bundled_msvc();\n#endif\n' + part[pos:]
         source = source[:start] + part + source[end:]
     p.write_text(source)
+if variant == 'current':
+    # The main candidate now includes exactly the MSVC-only runtime tested
+    # in the necessity experiment. Ignore platform newline conversion.
+    current = Path('src/djni.c').read_text()
+    tested = (Path.cwd().parent / 'msvc/src/djni.c').read_text()
+    if current != tested:
+        raise SystemExit('Current candidate differs from the isolated, tested MSVC implementation')
+    print('Current candidate djni.c matches the isolated MSVC implementation')
 print('BUILD VARIANT', variant)
 PY
     # Keep an auditable patch for each enhancement against the candidate.
@@ -77,13 +86,13 @@ jar="$(cygpath -m "$work/lib/jri/rJava/jri/JRI.jar")"
 } >> "$GITHUB_ENV"
 # Demonstrate how enabling JRI changes install-failure behavior, once per R.
 if [[ "$RJE_TEST_JDK_VERSION" == 21 ]]; then
-  for variant in candidate jri; do
+  for variant in candidate current jri; do
     mkdir -p "$work/lib/invalid-$variant"
     status=0
     env IGNORE= JRI=1 JRI_JFLAGS=--rjava-intentional-invalid-option R CMD INSTALL \
       --library="$(cygpath -m "$work/lib/invalid-$variant")" "$work/$variant.tar.gz" \
       > "$work/logs/jri-invalid-$variant.log" 2>&1 || status=$?
-    if [[ "$variant" == candidate ]]; then
+    if [[ "$variant" != jri ]]; then
       [[ "$status" == 0 ]]
     else
       [[ "$status" != 0 ]]

@@ -9,7 +9,7 @@ $env:R_HOME = $env:RJE_COMPARE_R_HOME
 $env:JAVA_HOME = $env:RJE_JAVA_HOME_TEST
 $env:NOAWT = '1'
 $probePath = @((Join-Path $env:R_HOME 'bin/x64'), (Join-Path $env:R_HOME 'bin'), $system, $env:SystemRoot) -join ';'
-foreach ($build in 'master', 'candidate', 'msvc', 'jri') {
+foreach ($build in 'master', 'candidate', 'msvc', 'current', 'jri') {
     $jarPresent = Test-Path "$work/lib/$build/rJava/jri/JRI.jar"
     if ($jarPresent -ne ($build -eq 'jri')) { throw "Unexpected bundled JRI presence for $build" }
     Write-Output "PACKAGING $build JRI.jar=$jarPresent"
@@ -102,11 +102,12 @@ foreach ($fixture in 'normal', 'missing', 'old') {
             $path = Join-Path $system $name
             if (Test-Path $path) { Write-Output "$path version $((Get-Item $path).VersionInfo.FileVersion)" }
         }
-        foreach ($build in 'master', 'candidate', 'msvc') {
+        foreach ($build in 'master', 'candidate', 'msvc', 'current') {
             foreach ($scenario in 'fresh', 'hosted') { Probe $fixture $build $scenario }
         }
+        foreach ($build in 'msvc', 'current') { Probe $fixture $build 'retained' }
         if ($fixture -eq 'normal') {
-            foreach ($build in 'master', 'candidate', 'jri') {
+            foreach ($build in 'master', 'candidate', 'current', 'jri') {
                 Probe $fixture $build 'external-jri'
                 Probe $fixture $build 'bundled-jri'
             }
@@ -120,22 +121,28 @@ $rows | Export-Csv -NoTypeInformation "$work/results.csv"
 $rows | ConvertTo-Json -Depth 4 | Set-Content "$work/results.json"
 $summary = [Collections.Generic.List[string]]::new()
 $summary.Add('### Windows compatibility comparison')
-$summary.Add('Pinned master 534ff33; candidate fdbe195; MSVC-only and JRI-only variants restore only the corresponding enhancement from cd6bbe5.')
+$summary.Add("Master 534ff33; minimal pre-MSVC candidate fdbe195; current combined candidate $env:UPSTREAM_CANDIDATE. MSVC-only and JRI-only controls restore their respective changes from cd6bbe5.")
 $summary.Add('')
-$summary.Add('| System VC++ | Scenario | Master | Candidate | MSVC only | Interpretation |')
-$summary.Add('|---|---|---|---|---|---|')
+$summary.Add('| System VC++ | Scenario | Master | Minimal candidate | MSVC only | Current candidate | Interpretation |')
+$summary.Add('|---|---|---|---|---|---|---|')
 $regressions = 0
 foreach ($fixture in 'normal', 'missing', 'old') {
     foreach ($scenario in 'fresh', 'hosted') {
         $m = ($rows | Where-Object { $_.fixture -eq $fixture -and $_.build -eq 'master' -and $_.scenario -eq $scenario }).status
         $c = ($rows | Where-Object { $_.fixture -eq $fixture -and $_.build -eq 'candidate' -and $_.scenario -eq $scenario }).status
         $e = ($rows | Where-Object { $_.fixture -eq $fixture -and $_.build -eq 'msvc' -and $_.scenario -eq $scenario }).status
+        $n = ($rows | Where-Object { $_.fixture -eq $fixture -and $_.build -eq 'current' -and $_.scenario -eq $scenario }).status
         $meaning = if ($m -eq 'PASS' -and $c -eq 'FAIL') { $regressions++; 'Candidate regression: inspect stage and module origins' }
                    elseif ($m -eq 'FAIL' -and $c -eq 'FAIL' -and $e -eq 'PASS') { 'MSVC enhancement extends baseline compatibility' }
                    elseif ($m -eq 'PASS' -and $c -eq 'PASS') { 'No enhancement required in this case' }
                    else { 'Inspect logs; outcome does not establish necessity' }
-        $summary.Add("| $fixture | $scenario | $m | $c | $e | $meaning |")
+        $summary.Add("| $fixture | $scenario | $m | $c | $e | $n | $meaning |")
     }
+}
+$summary.Add('')
+$summary.Add('Current-candidate lifetime checks:')
+foreach ($row in ($rows | Where-Object { $_.build -eq 'current' -and $_.scenario -eq 'retained' })) {
+    $summary.Add("- $($row.fixture) / original owner releases MSVC DLLs: $($row.status)")
 }
 $summary.Add('')
 $summary.Add('JRI observations (an external application supplies the JRI-only build as its own dependency):')
@@ -147,10 +154,14 @@ $summary.Add('Missing/old system DLLs are controlled deployment conditions, not 
 $summary | Set-Content "$work/summary.md"
 $summary | Add-Content $env:GITHUB_STEP_SUMMARY
 if ($regressions) { throw "$regressions candidate-only failures need investigation" }
-foreach ($build in 'master', 'candidate', 'msvc') {
+foreach ($build in 'master', 'candidate', 'msvc', 'current') {
     if ($rows | Where-Object { $_.fixture -eq 'normal' -and $_.build -eq $build -and $_.scenario -in @('fresh', 'hosted') -and $_.status -ne 'PASS' }) { throw "Normal-system workload failed: $build" }
 }
-foreach ($build in 'master', 'candidate', 'jri') {
+foreach ($build in 'master', 'candidate', 'current', 'jri') {
     if ($rows | Where-Object { $_.build -eq $build -and $_.scenario -eq 'external-jri' -and $_.status -ne 'PASS' }) { throw "External JRI application failed: $build" }
 }
 if (($rows | Where-Object { $_.build -eq 'jri' -and $_.scenario -eq 'bundled-jri' }).status -ne 'PASS') { throw 'Bundled JRI positive control failed' }
+
+if ($rows | Where-Object { $_.build -eq 'current' -and $_.scenario -in @('fresh', 'hosted', 'retained') -and $_.status -ne 'PASS' }) {
+    throw 'Combined main candidate failed a Windows deployment workload'
+}

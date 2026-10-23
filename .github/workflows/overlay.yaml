@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 env:
-  UPSTREAM_CANDIDATE: fdbe195dc8e9a480345197eede0d0131a912eac5
+  UPSTREAM_CANDIDATE: c5834c8efa6c97239f9f922d5bdedd8e143cf30a
 jobs:
   overlay:
     name: Overlayfs (${{ matrix.release }}, ${{ matrix.expect }})

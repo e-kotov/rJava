@@ -35,6 +35,23 @@ result <- tryCatch({
   stage <- "namespace-load"
   loadNamespace("rJava", lib.loc = lib)
   stopifnot(identical(normalizePath(find.package("rJava")), normalizePath(package)))
+  if (scenario == "retained") {
+    stage <- "retain-after-owner-unloads"
+    dyn.load(Sys.getenv("RJE_COMPARE_HOST"))
+    jvm <- get(".find.jvm.library", asNamespace("rJava"))(home)[1]
+    bin <- dirname(dirname(jvm))
+    dependencies <- file.path(bin, c("vcruntime140.dll", "vcruntime140_1.dll"))
+    dependencies <- dependencies[file.exists(dependencies)]
+    for (dll in dependencies) dyn.load(dll)
+    owner <- file.path(bin, "msvcp140.dll")
+    stopifnot(file.exists(owner))
+    dyn.load(owner)
+    rJava::.jloadJVM(jvm)
+    dyn.unload(owner)
+    for (dll in rev(dependencies)) dyn.unload(dll)
+    stopifnot(.C("rjava_test_module_loaded", "msvcp140.dll", result = 0L)$result == 1L)
+    cat("PASS MSVC reference retained after original owner unloads\n")
+  }
   stage <- "startup-and-late-native-loads"
   source(Sys.getenv("RJE_COMPARE_WORKLOAD"))
   stopifnot(windows_workload(home))

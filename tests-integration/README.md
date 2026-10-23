@@ -1,8 +1,8 @@
 # Deferred JVM loading: fork test harness
 
 This directory and the added workflows are fork-only validation infrastructure.
-The upstream candidate excludes them, Windows JRI build changes, and MSVC
-runtime retention. The original preview is preserved at
+The upstream candidate excludes the fork-only infrastructure and Windows JRI
+build changes. It includes MSVC runtime retention for Windows compatibility. The original preview is preserved at
 `archive/dynamic-preview-cd6bbe5` for comparison and follow-up work.
 
 ## Runtime contract
@@ -97,15 +97,17 @@ branch filters nor the consumer checkout is proposed upstream.
 Dispatch `dynamic.yaml` with `windows_comparison=true` to run only the
 controlled Windows comparison, without rerunning the general matrix. Six
 workers cover release R and R 4.5 with Temurin 8/21 and Zulu 25. Every worker
-builds four source variants in isolated libraries:
+builds five source variants in isolated libraries:
 
 - Upstream master at `534ff33` (also the upstream candidate's base).
-- The unchanged candidate at `fdbe195`.
+- The minimal, pre-MSVC candidate at `fdbe195` as a regression control.
 - The candidate plus only the MSVC retention function and its two call sites
   from `cd6bbe5`.
-- The candidate plus only the Windows JRI build changes from `cd6bbe5`.
+- The minimal candidate plus only the Windows JRI build changes from `cd6bbe5`.
+- The current main candidate, including MSVC retention. Its `djni.c` must
+  exactly match the isolated MSVC-only implementation above.
 
-The master, candidate and MSVC-only builds run identical public rJava calls
+The master, minimal, MSVC-only and current builds run identical public rJava calls
 in fresh R processes and after a native host creates Java. The workload uses
 compression, loopback networking, SHA-256, JVM management, the Windows
 certificate store, AWT drawing and PNG encoding. It verifies the selected
@@ -135,8 +137,17 @@ otherwise successful package install into a failure.
 
 Workload failures are experimental observations in CSV/JSON and logs, not
 silently skipped tests. Jobs fail on candidate-only regressions, unexpected
-normal-system failures, setup errors, or failed JRI positive controls. Worker
-summaries compare outcomes explicitly. PR #2's runtime sources are unchanged.
+normal-system failures, setup errors, or failed JRI positive controls. The
+current combined candidate must pass every normal/missing/old workload,
+including host attachment and releasing the original owner's MSVC references.
+Worker summaries compare outcomes explicitly.
+
+The initial comparison at `e88f800` (Actions run `39967767414`) established
+that master and the minimal candidate matched in all 36 workload cases.
+MSVC retention cured 16 shared failures: all missing-runtime cases and the
+JDK 8 cases with VC++ 2015 DLLs. The main candidate now includes that fix.
+External JRI hosting passed with every installed rJava variant, supporting
+keeping the Windows JRI build policy outside the main proposal.
 
 ## Limits
 
@@ -158,9 +169,11 @@ summaries compare outcomes explicitly. PR #2's runtime sources are unchanged.
   architectures, Windows ARM/32-bit, all R versions, or every downstream
   package that links directly to libjvm. Unreadable ELF metadata makes
   discovery fail safely rather than treating a mapped JVM as absent.
-- Windows JRI building and retention of bundled MSVC runtimes are follow-up
-  enhancements. This proposal preserves the existing Windows installation
-  scope and relies on the installed system runtime for later native loads.
+- Windows JRI building remains a separate feature. MSVC retention is included:
+  it prefers the selected JDK's bundled DLLs but preserves already loaded
+  host runtimes. An incompatible runtime already loaded by another component
+  can still require a fresh process. A JDK omitting a required DLL still
+  needs an appropriate system redistributable.
 - In-place edits to mapped native code, or replacement/remounting with a
   colliding inode and a loader-cached path on another filesystem, cannot be
   established as a new runtime by the loader's cached-name identity. Use
