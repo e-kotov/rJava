@@ -931,8 +931,9 @@ static int load_library(const char *path) {
 #ifdef __linux__
 static int check_jvm_name(const char *path);
 #endif
-/* Select the only mapped JVM image using a held reference, without opening
-   its recorded path: the file there may have been deleted or replaced. */
+/* Select the only mapped JVM image using a held reference, without loading
+   another JVM. Acquiring the reference may inspect the recorded path, whose
+   file may have been deleted or replaced. */
 static int attach_library(void) {
     struct jvm_image *jvms;
     int n = find_jvms(&jvms), res = -4, count = -1;

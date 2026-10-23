@@ -24,6 +24,7 @@
         return(.Call(RattachJVM))
     home <- .find.java.runtime()
     if (!is.null(mapped)) {
+        selected <- .Call(RattachJVM)
         discovered <- if (nzchar(home)) .find.jvm.library(home) else character()
         if (length(discovered) &&
             !identical(normalizePath(discovered[1], winslash="/"),
@@ -32,7 +33,7 @@
                     "; Java discovery selected ", discovered[1],
                     ". To select that runtime, start a new R process before loading packages that use Java.",
                     call.=FALSE)
-        return(.Call(RattachJVM))
+        return(selected)
     }
     if (!nzchar(home))
         stop("Cannot find Java. Set JAVA_HOME to an existing Java home before initializing the JVM.")

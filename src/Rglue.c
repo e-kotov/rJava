@@ -1165,9 +1165,9 @@ REPC SEXP RloadJVM(SEXP sPath, SEXP sSilent) {
     return Rf_ScalarLogical(1);
 }
 
-/* Selects the only mapped JVM library, e.g. from JavaGD or a Java host.
-   Unlike RloadJVM, no path names it: the file at its recorded name may have
-   been replaced since. The VM may not have been started yet. */
+/* Selects the only mapped JVM library, e.g. from JavaGD or a Java host,
+   without loading another JVM. Loader lookups may inspect its recorded path
+   to acquire a reference. The VM may not have been started yet. */
 REPC SEXP RattachJVM(void) {
     load_error(djni_attach());
     return Rf_ScalarLogical(1);
