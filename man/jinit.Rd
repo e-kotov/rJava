@@ -105,8 +105,9 @@
 
   Loading the rJava namespace does not select or load a JVM run-time.
   The first call to \code{.jinit} selects one, in this order:
-  a JVM already created in the process (e.g. when R is embedded in Java
-  via JRI), to which rJava attaches regardless of other settings;
+  the only JVM library already mapped in the process (e.g. by JavaGD),
+  even if no VM exists yet; if a VM exists (e.g. when R is embedded in
+  Java via JRI), rJava attaches regardless of other settings;
   otherwise the \code{java.home} option (Windows only) or the
   \code{JAVA_HOME} environment variable; then, on Windows, the
   \code{CurrentVersion} of the JavaSoft registry keys; on macOS,
@@ -127,8 +128,11 @@
   mapped, so retrying with any run-time then requires a new R process.
   If a JVM library is already mapped into the process, a JVM library
   path, such as one given to \code{.jloadJVM}, selects it only if it
-  names that same file, also when a JVM was created in it; attaching to
-  a created JVM is done by \code{.jinit} without a path.
+  names that same file, also when a JVM was created in it. Automatic
+  selection by \code{.jinit} adopts the mapped image without opening its
+  recorded path and warns if Java discovery selects a different path.
+  To select another JVM, start a new R process before loading packages
+  that map a JVM library.
 
   \code{.jloadJVM} selects a library without starting a VM and returns
   \code{TRUE} on success, or a status code when \code{silent = TRUE}.
@@ -144,13 +148,18 @@
   verified, explicit selection fails; attaching to an existing VM remains
   possible without a pathname comparison.
 
-  On Windows, rJava retains MSVC runtime DLLs used by the selected JDK so
-  later native Java loads can use its bundled copies even when system
-  copies are absent or older. An already loaded runtime keeps precedence;
-  otherwise the JDK's bundled copy is preferred, with System32 as fallback
-  when a bundled copy is absent. No persistent change to \code{PATH} or
-  DLL search directories is made. A JDK that omits a required runtime may
-  still need a suitable system redistributable.
+  On Windows, rJava retains MSVC runtime DLLs for later native Java
+  loads. Already loaded runtimes keep precedence. Otherwise, for each
+  runtime the JDK bundles, rJava selects the newer of System32 and the
+  bundled copy before loading \code{jvm.dll}, preferring System32 on a
+  tie or unknown version. Unbundled, unloaded runtimes are left to the
+  Windows loader. Retained copies stay loaded for the process lifetime;
+  this also determines which copies later native packages use. No
+  persistent change to \code{PATH} or DLL search directories is made.
+  A JDK that omits a required runtime may still need a suitable system
+  redistributable. A runtime already loaded by a host is not replaced,
+  even if a newer copy exists.
+
 
   NOTE: \code{.jinit()} can be called implicitly by other functions such
   as \code{\link{.jpackage}} or \code{\link{J}}.

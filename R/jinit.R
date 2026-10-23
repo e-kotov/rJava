@@ -16,15 +16,24 @@
   .Call(RunloadJVM)
 
 .jfindAndLoadJVM <- function() {
-    ## A Java application embedding R (e.g. JRI) has already created a JVM. It
-    ## is the only runtime this process can use, so attach to it whatever Java
-    ## home is configured, as rJava linked against the JVM library did. The
-    ## mapped image is selected itself, not through its name: .jloadJVM(path)
-    ## accepts only a path that names the mapped file.
+    ## A mapped JVM is the only runtime this process can use, even before
+    ## a VM exists (e.g. JavaGD links libjvm). Select the held image itself;
+    ## explicit .jloadJVM(path) still requires a path naming that same file.
     mapped <- .Call(RgetMappedJVM)
     if (!is.null(mapped) && isTRUE(mapped$vms > 0L))
         return(.Call(RattachJVM))
     home <- .find.java.runtime()
+    if (!is.null(mapped)) {
+        discovered <- if (nzchar(home)) .find.jvm.library(home) else character()
+        if (length(discovered) &&
+            !identical(normalizePath(discovered[1], winslash="/"),
+                       normalizePath(mapped$path, winslash="/", mustWork=FALSE)))
+            warning("Using the JVM library already mapped into this process: ", mapped$path,
+                    "; Java discovery selected ", discovered[1],
+                    ". To select that runtime, start a new R process before loading packages that use Java.",
+                    call.=FALSE)
+        return(.Call(RattachJVM))
+    }
     if (!nzchar(home))
         stop("Cannot find Java. Set JAVA_HOME to an existing Java home before initializing the JVM.")
     libjvm <- .find.jvm.library(home)
