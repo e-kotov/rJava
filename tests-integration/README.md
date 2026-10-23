@@ -9,8 +9,9 @@ build changes. It includes MSVC runtime retention for Windows compatibility. The
 
 Loading the namespace does not select or load a JVM library. First `.jinit()`:
 
-1. Attaches to the single JVM already created in the process, regardless of
-   Java-home settings.
+1. Adopts the single JVM library already mapped in the process, even before
+   a VM exists (e.g. JavaGD). Warns if discovery selects a different path.
+   Attaches to an existing VM regardless of Java-home settings.
 2. Otherwise uses the Windows `java.home` option or `JAVA_HOME`.
 3. Tries the JavaSoft registry on Windows, `/usr/libexec/java_home` on macOS,
    or `R CMD config JAVA_HOME` on Linux, preserving the javareconf default.
@@ -104,8 +105,8 @@ builds five source variants in isolated libraries:
 - The candidate plus only the MSVC retention function and its two call sites
   from `cd6bbe5`.
 - The minimal candidate plus only the Windows JRI build changes from `cd6bbe5`.
-- The current main candidate, including MSVC retention. Its `djni.c` must
-  exactly match the isolated MSVC-only implementation above.
+- The current main candidate, including the reviewed fixes for runtime
+  version selection and preloaded JVM adoption (pinned by full commit).
 
 The master, minimal, MSVC-only and current builds run identical public rJava calls
 in fresh R processes and after a native host creates Java. The workload uses
@@ -145,9 +146,36 @@ Worker summaries compare outcomes explicitly.
 The initial comparison at `e88f800` (Actions run `39967767414`) established
 that master and the minimal candidate matched in all 36 workload cases.
 MSVC retention cured 16 shared failures: all missing-runtime cases and the
-JDK 8 cases with VC++ 2015 DLLs. The main candidate now includes that fix.
+JDK 8 cases with VC++ 2015 DLLs plus missing newer DLLs. These were missing
+runtime-dependency failures, not proof that an old version alone was at fault.
+The main candidate includes retention with version-aware selection.
 External JRI hosting passed with every installed rJava variant, supporting
 keeping the Windows JRI build policy outside the main proposal.
+
+## Review regression comparisons
+
+`regressions.yaml` builds master (`534ff33`), the reviewed bad candidate
+(`c5834c8`), and the current candidate in separate libraries. Jobs fail unless
+current required probes pass and the specified negative controls reproduce.
+
+- Windows release R and R 4.5: real pinned Temurin 8u392, 11.0.21, 17.0.8,
+  and 21.0.1; load an MSVC-built `std::mutex` consumer before or after Java,
+  including a native-hosted JVM. Master and current must pass; the former
+  candidate must crash when Java loads first. A no-rJava bundled-runtime
+  control must reproduce the same access violation; a plain consumer passes.
+  Runtime origins and file versions are logged. Probe PATH excludes Rtools
+  and Java directories, avoiding contamination by their runtime copies.
+- Linux and macOS: install actual CRAN JavaGD (binary on macOS), compare
+  namespace loading and `.jinit()` with unset, javareconf and alternate Java
+  homes. The macOS before/JavaGD/unset case must fail with the reviewed error;
+  current and master must pass every case. General integration additionally
+  asserts strict explicit-path refusal, automatic adoption, warning behaviour
+  and absence of a second JVM with local/global preloads and unset Java home.
+
+The normal/missing/VC++2015 comparison remains separate and must pass for the
+current candidate, including host attachment and original-owner unloading.
+The mutex consumer is a focused ABI reproduction, not a test of every real
+MSVC package or a measurement of deployment prevalence. All tests are headless.
 
 ## Limits
 
@@ -170,8 +198,9 @@ keeping the Windows JRI build policy outside the main proposal.
   package that links directly to libjvm. Unreadable ELF metadata makes
   discovery fail safely rather than treating a mapped JVM as absent.
 - Windows JRI building remains a separate feature. MSVC retention is included:
-  it prefers the selected JDK's bundled DLLs but preserves already loaded
-  host runtimes. An incompatible runtime already loaded by another component
+  it preserves already loaded host runtimes; otherwise, for DLLs the JDK
+  bundles, it selects the newer of System32 and the JDK before loading
+  jvm.dll (System32 on ties or unknown versions). An incompatible runtime already loaded by another component
   can still require a fresh process. A JDK omitting a required DLL still
   needs an appropriate system redistributable.
 - In-place edits to mapped native code, or replacement/remounting with a

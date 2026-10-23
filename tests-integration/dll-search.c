@@ -1,7 +1,7 @@
 /* Windows only: the JVM bin directory may be added to the DLL search path
    only while djni_load() loads jvm.dll, and must be removed again after both
    failed and successful loads. Build and run with a stripped PATH:
-     gcc -Isrc -o dll-search.exe tests-integration/dll-search.c
+     gcc -Isrc -o dll-search.exe tests-integration/dll-search.c -lversion
      dll-search.exe <missing bin\server\jvm.dll> <copied bin\server\jvm.dll> <bin of the first>
    Both bin directories contain rjava_marker.dll, which is nowhere else. */
 #include "../src/djni.c"

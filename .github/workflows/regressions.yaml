@@ -1,0 +1,129 @@
+name: Deferred JVM regression comparisons
+on:
+  push:
+    branches: [feature/dynamic-cross-platform]
+  workflow_dispatch:
+env:
+  UPSTREAM_CANDIDATE: 76d01fbac2080171cd9f37e02c6d9e9dc3851044
+jobs:
+  msvc-precedence:
+    name: Older JDK MSVC precedence (R ${{ matrix.r }})
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        r: ['release', '4.5']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.r }}
+          rtools-version: '45'
+      - name: Download four pinned 2023 Temurin releases
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'oldjdk'
+          New-Item -ItemType Directory -Force $root | Out-Null
+          $map = [ordered]@{}
+          foreach ($tag in 'jdk8u392-b08', 'jdk-11.0.21+9', 'jdk-17.0.8+7', 'jdk-21.0.1+12') {
+            $zip = Join-Path $root "$($tag -replace '\+','_').zip"
+            Invoke-WebRequest "https://api.adoptium.net/v3/binary/version/$([uri]::EscapeDataString($tag))/windows/x64/jdk/hotspot/normal/eclipse" -OutFile $zip
+            Write-Output "JDK $tag SHA256 $((Get-FileHash $zip -Algorithm SHA256).Hash)"
+            $dest = Join-Path $root ($tag -replace '\+','_')
+            Expand-Archive $zip $dest
+            $map[$tag] = (Get-ChildItem $dest -Directory | Select-Object -First 1).FullName -replace '\\','/'
+          }
+          "REVIEW_JDKS=$($map | ConvertTo-Json -Compress)" | Out-File -Append $env:GITHUB_ENV
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build master, reviewed candidate and current candidate
+        shell: bash
+        run: bash tests-integration/regression-build.sh
+      - name: Build a later MSVC consumer using std::mutex
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'rjava-regressions/native'
+          cl /nologo /LD /MD /EHsc /O2 tests-integration/msvc-mutex.cpp /Fe:"$out/mutex.dll" /Fo:"$out/"
+          if ($LASTEXITCODE) { throw 'MSVC consumer compilation failed' }
+          dumpbin /dependents "$out/mutex.dll"
+          if ($LASTEXITCODE) { throw 'Cannot inspect consumer dependencies' }
+      - name: Require current and master to pass and reproduce the former crashes
+        shell: pwsh
+        run: |
+          $env:R_HOME_DIR = (Rscript --vanilla -e 'cat(R.home())')
+          ./tests-integration/msvc-precedence.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: msvc-precedence-R-${{ matrix.r }}
+          path: |
+            ${{ runner.temp }}/rjava-regressions/logs
+            ${{ runner.temp }}/rjava-regressions/results.csv
+  javagd:
+    name: ${{ matrix.os }} JavaGD baseline comparison
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      NOAWT: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+          use-public-rspm: true
+      - uses: actions/setup-java@v5
+        id: alternate
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Configure R to use JDK 17
+        shell: bash
+        run: |
+          set -euo pipefail
+          { echo "export PATH=$PATH"; echo "export JAVA_HOME=$JAVA_HOME"; echo 'R CMD javareconf'; } > "$RUNNER_TEMP/reconf.sh"
+          sudo bash "$RUNNER_TEMP/reconf.sh"
+          R CMD config JAVA_HOME
+      - name: Build master, reviewed candidate and current candidate
+        shell: bash
+        run: bash tests-integration/regression-build.sh
+      - name: Install JavaGD as distributed by CRAN
+        shell: bash
+        run: |
+          type=source
+          if [[ "$RUNNER_OS" == macOS ]]; then type=binary; fi
+          Rscript --vanilla -e ".libPaths(c('$RUNNER_TEMP/rjava-regressions/lib/master', .libPaths())); install.packages('JavaGD', lib='$RUNNER_TEMP/rjava-regressions/lib/javagd', type='$type', dependencies=FALSE, repos='https://cloud.r-project.org'); stopifnot(requireNamespace('JavaGD', quietly=TRUE, lib.loc='$RUNNER_TEMP/rjava-regressions/lib/javagd'))"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            otool -L "$RUNNER_TEMP/rjava-regressions/lib/javagd/JavaGD/libs/JavaGD.so"
+          else
+            ldd "$RUNNER_TEMP/rjava-regressions/lib/javagd/JavaGD/libs/JavaGD.so"
+          fi
+      - name: Compare JavaGD loading with unset, configured and alternate JAVA_HOME
+        shell: bash
+        env:
+          RJE_JAVA_ALTERNATE: ${{ steps.alternate.outputs.path }}
+        run: bash tests-integration/javagd-regression.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: javagd-regression-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/rjava-regressions/logs
+            ${{ runner.temp }}/rjava-regressions/results.csv

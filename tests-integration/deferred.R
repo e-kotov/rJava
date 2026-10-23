@@ -160,6 +160,12 @@ later_loads <- function() {
   }
 }
 
+one_jvm <- function() {
+  maps <- sub("^(\\S+\\s+){5}", "", grep("^(\\S+\\s+){5}/", readLines("/proc/self/maps"), value = TRUE))
+  jvms <- unique(maps[basename(maps) == "libjvm.so"])
+  if (length(jvms) != 1L) stop("expected one JVM library mapped, found: ", paste(jvms, collapse = ", "))
+}
+
 switch(scenario,
   select = {
     Sys.setenv(JAVA_HOME = home_b)
@@ -201,22 +207,26 @@ switch(scenario,
     start(home_a)
   },
   preloaded = {
-    # A JVM library mapped outside this loader rejects a different runtime and
-    # permits the same one, without starting a VM. With global symbols, its
+    # Explicit selection rejects a different file. Automatic .jinit() adopts
+    # the preloaded image, even with a conflicting or absent Java home. Global
     # JNI exports must not interpose on rJava's own loader wrappers.
-    stopifnot(variant %in% c("", "global"))
-    # The internal attach used by .jinit() selects only a created VM.
+    stopifnot(variant %in% c("", "global", "unset"))
     attach <- function() .Call(internal("RattachJVM"))
     fails(attach(), "No JVM library is mapped")
     preload(lib(home_a), local = variant != "global")
     mapped <- .Call(internal("RgetMappedJVM"))
     stopifnot(!is.null(mapped), identical(mapped$vms, 0L))
-    fails(attach(), "created no VM")
-    Sys.setenv(JAVA_HOME = home_b)
-    fails(rJava::.jinit(), "already mapped")
     fails(internal(".jloadJVM")(lib(home_b)), "already mapped")
-    Sys.setenv(JAVA_HOME = home_a)
-    start(home_a)
+    if (variant == "unset") Sys.unsetenv("JAVA_HOME") else Sys.setenv(JAVA_HOME = home_b)
+    warned <- FALSE
+    withCallingHandlers(start(home_a), warning = function(w) {
+      if (grepl("already mapped", conditionMessage(w), fixed = TRUE)) warned <<- TRUE
+      log("warning:", conditionMessage(w))
+      invokeRestart("muffleWarning")
+    })
+    if (variant != "unset") stopifnot(warned)
+    unmapped(home_b)
+    one_jvm()
   },
   alias = {
     # The mapped library must be recognized by file identity, not by name.
@@ -250,7 +260,7 @@ switch(scenario,
       preload(copy, bin = dirname(dirname(lib(home_b))))
       expect_mapped(copy, 0L)
       Sys.setenv(JAVA_HOME = home_a)
-      fails(rJava::.jinit(), "already mapped")
+      fails(internal(".jloadJVM")(lib(home_a)), "already mapped")
       fails(internal(".jloadJVM")(lib(home_b)), "already mapped")
       expect_mapped(copy, 0L)
     } else {
@@ -270,7 +280,6 @@ switch(scenario,
       # is certain to be mapped under the unusual name.
       expect_mapped(if (variant == "hardlink") path, 0L)
       Sys.setenv(JAVA_HOME = home_b)
-      fails(rJava::.jinit(), "already mapped")
       fails(internal(".jloadJVM")(lib(home_b)), "already mapped")
       Sys.setenv(JAVA_HOME = home_a)
       if (windows) {
@@ -311,8 +320,6 @@ switch(scenario,
         expect_mapped(NULL, 0L)
         fails(internal(".jloadJVM")(lib(home_b)), "already mapped")
         fails(internal(".jloadJVM")(path), "already mapped")
-        Sys.setenv(JAVA_HOME = home_b)
-        fails(rJava::.jinit(), "already mapped")
         internal(".jloadJVM")(moved)
         stopifnot(state()$state == "none")
         start(home)
@@ -334,8 +341,6 @@ switch(scenario,
       # identified as A's JVM before B is mapped.
       fails(internal(".jloadJVM")(lib(home_b)), "already mapped")
       fails(internal(".jloadJVM")(path), "already mapped")
-      Sys.setenv(JAVA_HOME = home_b)
-      fails(rJava::.jinit(), "already mapped")
       unmapped(home_b)
       if (byname == "B") {
         # musl would bind the JDK's libraries to B's libjvm.so: A is refused
@@ -391,11 +396,7 @@ switch(scenario,
       stopifnot(status$done == cycles, status$unmapped == cycles, calls > 0L)
     }
     attach <- function() .Call(internal("RattachJVM"))
-    one_jvm <- function() {
-      maps <- sub("^(\\S+\\s+){5}", "", grep("^(\\S+\\s+){5}/", readLines("/proc/self/maps"), value = TRUE))
-      jvms <- unique(maps[basename(maps) == "libjvm.so"])
-      if (length(jvms) != 1L) stop("expected one JVM library mapped, found: ", paste(jvms, collapse = ", "))
-    }
+
     stopifnot(is.null(raced(mapped_jvm())))
     churned(function() stopifnot(is.null(mapped_jvm())))
     raced(fails(attach(), "No JVM library is mapped"))

@@ -9,7 +9,7 @@ on:
         type: boolean
         default: false
 env:
-  UPSTREAM_CANDIDATE: c5834c8efa6c97239f9f922d5bdedd8e143cf30a
+  UPSTREAM_CANDIDATE: 76d01fbac2080171cd9f37e02c6d9e9dc3851044
 jobs:
   dynamic:
     if: github.event_name != 'workflow_dispatch' || !inputs.windows_comparison
@@ -160,6 +160,7 @@ jobs:
           run hosted explicit
           if [[ "$RUNNER_OS" != Windows ]]; then run jengine; fi
           run preloaded global
+          run preloaded unset
           run laterload b
           run alias link
           run alias spelling
@@ -217,7 +218,7 @@ jobs:
           marker="$(dirname "$server")/java.dll"
           cp "$marker" "$work/missing/bin/rjava_marker.dll"
           cp "$marker" "$work/copy/bin/rjava_marker.dll"
-          gcc -Isrc -o "$work/dll-search.exe" tests-integration/dll-search.c
+          gcc -Isrc -o "$work/dll-search.exe" tests-integration/dll-search.c -lversion
           w() { cygpath -w "$1"; }
           PATH="/c/Windows/System32:/c/Windows" "$work/dll-search.exe" \
             "$(w "$work/missing/bin/server/jvm.dll")" "$(w "$work/copy/bin/server/jvm.dll")" "$(w "$work/missing/bin")"

@@ -47,14 +47,6 @@ elif variant == 'msvc':
         part = part[:pos] + '#ifdef _WIN32\n    if (!res) load_bundled_msvc();\n#endif\n' + part[pos:]
         source = source[:start] + part + source[end:]
     p.write_text(source)
-if variant == 'current':
-    # The main candidate now includes exactly the MSVC-only runtime tested
-    # in the necessity experiment. Ignore platform newline conversion.
-    current = Path('src/djni.c').read_text()
-    tested = (Path.cwd().parent / 'msvc/src/djni.c').read_text()
-    if current != tested:
-        raise SystemExit('Current candidate differs from the isolated, tested MSVC implementation')
-    print('Current candidate djni.c matches the isolated MSVC implementation')
 print('BUILD VARIANT', variant)
 PY
     # Keep an auditable patch for each enhancement against the candidate.
