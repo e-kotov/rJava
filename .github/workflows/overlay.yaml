@@ -5,6 +5,8 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  UPSTREAM_CANDIDATE: fdbe195dc8e9a480345197eede0d0131a912eac5
 jobs:
   overlay:
     name: Overlayfs (${{ matrix.release }}, ${{ matrix.expect }})
@@ -21,6 +23,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Verify the upstream candidate runtime sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$UPSTREAM_CANDIDATE"
+          git diff --exit-code "$UPSTREAM_CANDIDATE" HEAD -- NEWS R src man configure configure.ac configure.win
+          echo "Runtime sources match upstream candidate $UPSTREAM_CANDIDATE"
       - name: Install VM tools
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils
       - name: Check a real guest kernel and overlay mount

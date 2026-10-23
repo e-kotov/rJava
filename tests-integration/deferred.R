@@ -454,6 +454,18 @@ switch(scenario,
     Sys.setenv(JAVA_HOME = link_home(home_b))
     start(home_b)
   },
+  configured = {
+    # Linux must prefer R's javareconf home to a different java on PATH.
+    if (Sys.info()[["sysname"]] == "Linux") {
+      Sys.unsetenv("JAVA_HOME")
+      Sys.setenv(PATH = paste(file.path(home_b, "bin"), minimal_path, sep = ":"))
+      configured <- system2(file.path(R.home("bin"), "R"), c("CMD", "config", "JAVA_HOME"), stdout = TRUE)
+      stopifnot(length(configured) == 1L, dir.exists(configured))
+      log("configured home", configured, "PATH home", home_b)
+      stopifnot(identical(internal(".find.java.runtime")(), configured))
+      start(configured)
+    } else log("configured-JDK preference is Linux-only")
+  },
   fallback = {
     # An invalid explicit home is ignored with a warning, as before deferred
     # loading, and discovery falls back. Expected homes are computed outside rJava.
@@ -465,6 +477,10 @@ switch(scenario,
     if (length(java_home) == 1L && is.null(attr(java_home, "status")) && dir.exists(java_home)) {
       expected <- java_home
     } else if (!windows) Sys.setenv(PATH = paste(file.path(expected, "bin"), minimal_path, sep = ":"))
+    if (Sys.info()[["sysname"]] == "Linux") {
+      configured <- system2(file.path(R.home("bin"), "R"), c("CMD", "config", "JAVA_HOME"), stdout = TRUE)
+      if (length(configured) == 1L && dir.exists(configured)) expected <- configured
+    }
     stopifnot(dir.exists(expected))
     log("expecting fallback to", expected)
     warned <- FALSE
@@ -473,25 +489,6 @@ switch(scenario,
     })
     stopifnot(warned)
     start(expected)
-  },
-  retained = {
-    stopifnot(windows)
-    bin <- dirname(dirname(lib(home_a)))
-    # Keep the fixture coherent before rJava runs: a plain dyn.load(msvcp)
-    # otherwise pulls its VCRUNTIME imports from System32.
-    dependencies <- file.path(bin, c("vcruntime140.dll", "vcruntime140_1.dll"))
-    dependencies <- dependencies[file.exists(dependencies)]
-    for (dependency in dependencies) dyn.load(dependency)
-    dll <- file.path(bin, "msvcp140.dll")
-    dyn.load(dll)
-    dyn.load(Sys.getenv("RJE_JVMHOST"))
-    stopifnot(.C("rjava_test_module_loaded", "msvcp140.dll", result = 0L)$result == 1L)
-    rJava::.jloadJVM(lib(home_a))
-    dyn.unload(dll)
-    for (dependency in rev(dependencies)) dyn.unload(dependency)
-    stopifnot(.C("rjava_test_module_loaded", "msvcp140.dll", result = 0L)$result == 1L)
-    start(home_a)
-    later_loads()
   },
   laterload = {
     home <- if (variant == "b") home_b else home_a

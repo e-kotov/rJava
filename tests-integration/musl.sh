@@ -93,7 +93,11 @@ run() {
   R_JAVA_LD_LIBRARY_PATH="$dir" RJE_BYNAME="$jdk" Rscript --vanilla tests-integration/deferred.R "$@"
   echo "::endgroup::"
 }
-for scenario in select retry badinput nonascii fallback decoy; do run B "$scenario"; done
+for scenario in select retry badinput nonascii decoy; do run B "$scenario"; done
+configured_server="$(server "$JAVA_HOME")"
+for scenario in configured fallback; do
+  R_JAVA_LD_LIBRARY_PATH="$configured_server" Rscript --vanilla tests-integration/deferred.R "$scenario"
+done
 for scenario in unload preloaded laterload hosted jengine; do run A "$scenario"; done
 run A hosted explicit
 run A preloaded global

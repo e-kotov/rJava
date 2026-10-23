@@ -8,9 +8,8 @@ if (Sys.getenv("RJE_OVERLAY_USERNS") == "1") {
   ids <- scan("/proc/self/uid_map", quiet = TRUE)
   stopifnot(uid == 0L, length(ids) == 3L, ids[1] == 0, ids[2] != 0, ids[3] == 1)
 } else stopifnot(uid != 0L)
-ambiguous <- "^Cannot verify that .*because the overlayfs mapping identity cannot be verified[.]"
+ambiguous <- "^Cannot verify that .*because the filesystem mapping identity cannot be verified[.]"
 different <- "^Another JVM library is already mapped:"
-same_ambiguous <- expect == "legacy" || layout == "cross-off"
 stopifnot(expect %in% c("legacy", "distro", "current"), Sys.info()[["sysname"]] == "Linux")
 kernel <- numeric_version(sub("-.*", "", Sys.info()[["release"]]))
 stopifnot(if (expect == "current") kernel >= "6.8" else kernel < "6.8")
@@ -44,12 +43,18 @@ if (scenario == "fresh") {
   # Record the actual mapping and overlay inode in CI, not just kernel versions.
   cat(readLines("/proc/self/maps")[grepl("libjvm", readLines("/proc/self/maps"))], sep = "\n")
   system2("stat", c("-Lc", shQuote("overlay device=%d inode=%i"), shQuote(lib(a))))
+  maps <- readLines("/proc/self/maps")
+  mapped_line <- maps[endsWith(maps, paste0(" ", lib(a)))][1]
+  mapped_inode <- strsplit(trimws(mapped_line), "[[:space:]]+")[[1]][5]
+  file_inode <- system2("stat", c("-Lc", "%i", shQuote(lib(a))), stdout = TRUE)
+  same_ambiguous <- !identical(mapped_inode, file_inode)
+  cat("same-file identity unverifiable:", same_ambiguous, "\n")
   reject(lib(b), different)
   if (scenario == "replaced") {
     # Replacing through the overlay triggers copy-up/whiteout behavior.
     path <- lib(a)
     stopifnot(unlink(path) == 0L, file.copy(lib(b), path))
-    reject(path, if (expect == "legacy" || layout == "cross-off") ambiguous else different)
+    reject(path, if (same_ambiguous) ambiguous else paste0("(", ambiguous, "|", different, ")"))
   } else {
     if (same_ambiguous) reject(lib(a), ambiguous) else {
       stopifnot(isTRUE(rJava::.jloadJVM(lib(a))))

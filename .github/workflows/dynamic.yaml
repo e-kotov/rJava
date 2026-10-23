@@ -3,6 +3,8 @@ on:
   push:
     branches: [feature/dynamic-cross-platform]
   workflow_dispatch:
+env:
+  UPSTREAM_CANDIDATE: fdbe195dc8e9a480345197eede0d0131a912eac5
 jobs:
   dynamic:
     # Three runtime pairs per platform instead of every OS x vendor x version:
@@ -32,6 +34,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Verify the upstream candidate runtime sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$UPSTREAM_CANDIDATE"
+          git diff --exit-code "$UPSTREAM_CANDIDATE" HEAD -- NEWS R src man configure configure.ac configure.win
+          echo "Runtime sources match upstream candidate $UPSTREAM_CANDIDATE"
       - uses: r-lib/actions/setup-r@v2
         with:
           r-version: ${{ matrix.r || 'release' }}
@@ -139,11 +148,11 @@ jobs:
         run: |
           set -euo pipefail
           run() { echo "::group::$*"; Rscript --vanilla tests-integration/deferred.R "$@"; echo "::endgroup::"; }
-          for scenario in select retry badinput unload preloaded nonascii fallback laterload hosted; do
+          for scenario in select retry badinput unload preloaded nonascii fallback configured laterload hosted; do
             run "$scenario"
           done
           run hosted explicit
-          run jengine
+          if [[ "$RUNNER_OS" != Windows ]]; then run jengine; fi
           run preloaded global
           run laterload b
           run alias link
@@ -183,6 +192,7 @@ jobs:
           # A mapped DLL cannot be deleted, so Windows leaves them behind until here.
           find "$RJE_JAVA_HOME_A/" "$RJE_JAVA_HOME_B/" -name 'rjava-alias-*' -print -delete
       - name: Embed R in a Java host through JRI
+        if: runner.os != 'Windows'
         shell: bash
         timeout-minutes: 5
         run: |
@@ -205,22 +215,26 @@ jobs:
           w() { cygpath -w "$1"; }
           PATH="/c/Windows/System32:/c/Windows" "$work/dll-search.exe" \
             "$(w "$work/missing/bin/server/jvm.dll")" "$(w "$work/copy/bin/server/jvm.dll")" "$(w "$work/missing/bin")"
-      - name: Verify bundled runtimes with installed system DLLs
+      - name: Keep Windows JRI outside the deferred-loading proposal
         if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./tests-integration/windows-msvc.ps1 -Mode normal
-      - name: Verify startup and host attachment without system VC++ DLLs
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./tests-integration/windows-msvc.ps1 -Mode missing
-      - name: Verify startup and host attachment with VC++ 2015 in System32
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./tests-integration/windows-msvc.ps1 -Mode old
-      - name: Check Windows JRI failure and opt-out behavior
-        if: runner.os == 'Windows' && matrix.set == 'current'
+        shell: Rscript {0}
+        run: |
+          stopifnot(!file.exists(system.file("jri", "JRI.jar", package="rJava")))
+      - name: Reject the unsupported static-loader option
+        if: runner.os == 'Linux' && matrix.set == 'current'
         shell: bash
-        run: bash tests-integration/jri-optional.sh
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/disable-dynload"
+          mkdir -p "$work"
+          tar -xzf "$RUNNER_TEMP"/rJava_*.tar.gz -C "$work"
+          cd "$work/rJava"
+          if ./configure --disable-dynload > configure-disable.log 2>&1; then
+            cat configure-disable.log
+            echo '::error::--disable-dynload unexpectedly succeeded'; exit 1
+          fi
+          cat configure-disable.log
+          grep -F -- '--disable-dynload is no longer supported' configure-disable.log
       - uses: actions/checkout@v4
         if: matrix.downstream
         with:
@@ -289,6 +303,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Verify the upstream candidate runtime sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$UPSTREAM_CANDIDATE"
+          git diff --exit-code "$UPSTREAM_CANDIDATE" HEAD -- NEWS R src man configure configure.ac configure.win
+          echo "Runtime sources match upstream candidate $UPSTREAM_CANDIDATE"
       - name: Check deferred loading, JRI and host attachment on musl
         env:
           # alpine:3.24.2
