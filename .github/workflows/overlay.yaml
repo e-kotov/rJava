@@ -1,0 +1,41 @@
+name: Overlayfs kernel compatibility
+on:
+  push:
+    branches: [feature/dynamic-cross-platform]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  UPSTREAM_CANDIDATE: dbe0c72d263eb07aeefd8d1a5b81839452ec5ba7
+jobs:
+  overlay:
+    name: Overlayfs (${{ matrix.release }}, ${{ matrix.expect }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {release: jammy, expect: legacy}
+          - {release: jammy, expect: distro}
+          - {release: noble, expect: current}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Verify the upstream candidate runtime sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$UPSTREAM_CANDIDATE"
+          git diff --exit-code "$UPSTREAM_CANDIDATE" HEAD -- NEWS R src man configure configure.ac configure.win
+          echo "Runtime sources match upstream candidate $UPSTREAM_CANDIDATE"
+      - name: Install VM tools
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils
+      - name: Check a real guest kernel and overlay mount
+        run: bash tests-integration/overlay-vm.sh '${{ matrix.release }}' '${{ matrix.expect }}'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: overlay-${{ matrix.release }}-${{ matrix.expect }}
+          path: ${{ runner.temp }}/overlay-${{ matrix.release }}/serial.log

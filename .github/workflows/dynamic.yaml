@@ -1,0 +1,387 @@
+name: Deferred JVM integration
+on:
+  push:
+    branches: [feature/dynamic-cross-platform]
+  workflow_dispatch:
+    inputs:
+      windows_comparison:
+        description: Validate the combined candidate against Windows compatibility controls
+        type: boolean
+        default: false
+env:
+  UPSTREAM_CANDIDATE: dbe0c72d263eb07aeefd8d1a5b81839452ec5ba7
+jobs:
+  dynamic:
+    if: github.event_name != 'workflow_dispatch' || !inputs.windows_comparison
+    # Three runtime pairs per platform instead of every OS x vendor x version:
+    # legacy layouts (JDK 8/11), current LTS (17/21, with downstream packages),
+    # and other vendors spanning 11 to 25. The build JDK is always Temurin 17.
+    # Linux arm64 runs all three: JDK 8 there uses jre/lib/aarch64/server.
+    name: ${{ matrix.os }} ${{ matrix.set }} (${{ matrix.a-dist }} ${{ matrix.a-version }}, ${{ matrix.b-dist }} ${{ matrix.b-version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        set: [legacy, current, vendor]
+        include:
+          - { set: legacy, a-dist: temurin, a-version: '8', b-dist: temurin, b-version: '11' }
+          # Temurin has no JDK 8 for macOS on arm64.
+          - { set: legacy, os: macos-latest, a-dist: zulu }
+          - { set: current, a-dist: temurin, a-version: '17', b-dist: temurin, b-version: '21', downstream: true }
+          - { set: vendor, a-dist: corretto, a-version: '11', b-dist: zulu, b-version: '25' }
+          - { set: r45, os: windows-latest, r: '4.5', a-dist: temurin, a-version: '17', b-dist: temurin, b-version: '21' }
+          # The oldest R that DESCRIPTION accepts.
+          - { set: r36, os: ubuntu-24.04, r: '3.6', a-dist: temurin, a-version: '17', b-dist: temurin, b-version: '21' }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      NOAWT: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Verify the upstream candidate runtime sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$UPSTREAM_CANDIDATE"
+          git diff --exit-code "$UPSTREAM_CANDIDATE" HEAD -- NEWS R src man configure configure.ac configure.win
+          echo "Runtime sources match upstream candidate $UPSTREAM_CANDIDATE"
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.r || 'release' }}
+          rtools-version: '45'
+      - uses: actions/setup-java@v5
+        id: java-a
+        with:
+          distribution: ${{ matrix.a-dist }}
+          java-version: ${{ matrix.a-version }}
+      - uses: actions/setup-java@v5
+        id: java-b
+        with:
+          distribution: ${{ matrix.b-dist }}
+          java-version: ${{ matrix.b-version }}
+      - uses: actions/setup-java@v5
+        id: java-build
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Record runtimes
+        shell: bash
+        env:
+          JAVA_A: ${{ steps.java-a.outputs.path }}
+          JAVA_B: ${{ steps.java-b.outputs.path }}
+        run: |
+          set -euo pipefail
+          for home in "$JAVA_A" "$JAVA_B"; do
+            echo "== $home"; "$home/bin/java" -version 2>&1
+            # The trailing slash follows a home that is a symbolic link (Linux).
+            find "$home/" \( -name 'libjvm.*' -o -name jvm.dll \) -print
+            # djni recognizes a JVM library under any name by these exports.
+            lib="$(find "$home/" \( -name 'libjvm.*' -o -name jvm.dll \) -path '*server*' -print -quit)"
+            case "$RUNNER_OS" in
+              Linux) syms="$(nm -D --defined-only "$lib")" ;;
+              macOS) syms="$(nm -gU "$lib")" ;;
+              Windows) syms="$(objdump -p "$lib" | tr -d '\r')" ;;
+            esac
+            for sym in JNI_CreateJavaVM JNI_GetCreatedJavaVMs JVM_CurrentTimeMillis; do
+              if grep -Eq "[ _]$sym(@|\$| )" <<< "$syms"; then echo "exports $sym"; else echo "::error::$lib does not export $sym"; exit 1; fi
+            done
+          done
+          {
+            echo "RJE_JAVA_HOME_A=$JAVA_A"
+            echo "RJE_JAVA_HOME_B=$JAVA_B"
+            echo "RJE_FALLBACK_HOME=$JAVA_B"
+          } >> "$GITHUB_ENV"
+      - name: Prepare Windows discovery and path fixtures
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Generate 8.3 names for directories created from now on.
+          fsutil 8dot3name set C: 0
+          # Machine-wide JavaSoft keys would take precedence over this user key.
+          reg query 'HKLM\Software\JavaSoft' /s 2>$null
+          if ($LASTEXITCODE -eq 0) { Write-Output 'HKLM JavaSoft keys are present' } else { Write-Output 'No HKLM JavaSoft keys' }
+          reg add 'HKCU\Software\JavaSoft\JDK' /v CurrentVersion /d rjava-test /f
+          reg add 'HKCU\Software\JavaSoft\JDK\rjava-test' /v JavaHome /d "$env:RJE_JAVA_HOME_B" /f
+      - name: Configure build Java
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          echo "export PATH=$PATH" > reconf.sh
+          echo "export JAVA_HOME=$JAVA_HOME" >> reconf.sh
+          echo "R CMD javareconf" >> reconf.sh
+          sudo bash reconf.sh
+      - name: Generate distribution and install in isolated library
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh mkdist
+          mkdir -p "$RUNNER_TEMP/rjava-lib"
+          archive="$(ls ../rJava_*.tar.gz)"
+          R CMD INSTALL --library="$RUNNER_TEMP/rjava-lib" "$archive"
+          cp "$archive" "$RUNNER_TEMP/"
+          echo "R_LIBS=$RUNNER_TEMP/rjava-lib" >> "$GITHUB_ENV"
+      - name: Inspect native JVM linkage
+        shell: bash
+        run: |
+          set -euo pipefail
+          lib="$(Rscript --vanilla -e 'cat(system.file("libs", package="rJava"))')"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            objdump -p "$lib/x64/rJava.dll" > "$RUNNER_TEMP/linkage.txt"
+          elif [[ "$RUNNER_OS" == macOS ]]; then
+            otool -L "$lib/rJava.so" > "$RUNNER_TEMP/linkage.txt"
+          else
+            ldd "$lib/rJava.so" > "$RUNNER_TEMP/linkage.txt"
+          fi
+          cat "$RUNNER_TEMP/linkage.txt"
+          if grep -Ei '(libjvm|DLL Name: jvm.dll)' "$RUNNER_TEMP/linkage.txt"; then exit 1; fi
+      - name: Compare src/jni.h with the JDK headers
+        shell: bash
+        run: Rscript --vanilla tests-integration/jni-abi.R "$RJE_JAVA_HOME_A" "$RJE_JAVA_HOME_B"
+      - name: Build a native helper that creates a JVM outside rJava
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/jvmhost"
+          cp tests-integration/jvmhost.c "$RUNNER_TEMP/jvmhost/"
+          src="$PWD/src"
+          if [[ "$RUNNER_OS" == Windows ]]; then src="$(cygpath -m "$src")"; fi
+          (cd "$RUNNER_TEMP/jvmhost" && PKG_CPPFLAGS="-I$src" R CMD SHLIB jvmhost.c)
+          echo "RJE_JVMHOST=$(ls "$RUNNER_TEMP"/jvmhost/jvmhost.{so,dll} 2>/dev/null)" >> "$GITHUB_ENV"
+      - name: Check deferred loading in fresh processes
+        shell: bash
+        run: |
+          set -euo pipefail
+          run() { echo "::group::$*"; Rscript --vanilla tests-integration/deferred.R "$@"; echo "::endgroup::"; }
+          for scenario in select retry badinput unload preloaded nonascii fallback configured laterload hosted; do
+            run "$scenario"
+          done
+          run hosted explicit
+          if [[ "$RUNNER_OS" != Windows ]]; then run jengine; fi
+          run preloaded global
+          run preloaded unset
+          run laterload b
+          run alias link
+          run alias spelling
+          if [[ "$RUNNER_OS" == Windows ]]; then run alias short; fi
+          # JVM libraries mapped under names no JVM uses, and a non-JVM library with JNI exports.
+          run renamed copy
+          run renamed hardlink
+          # A renamed jvm.dll cannot start a VM: JDK DLLs import jvm.dll by name.
+          if [[ "$RUNNER_OS" != Windows ]]; then run renamed symlink; run hosted renamed; fi
+          run decoy
+          # The file of a mapped JVM library is deleted, or replaced by B's.
+          run replaced deleted
+          run replaced replaced
+          run hosted replaced
+      - name: Unmap an unrelated library while mapped JVM discovery runs
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/dlrace"
+          mkdir -p "$dir"
+          # R's own flags show few warnings; the changed native code is checked with more.
+          cc="$(R CMD config CC)"
+          echo "::group::Warnings of src/djni.c with -Wall -Wextra"
+          $cc -O2 -Wall -Wextra -Isrc -c -o "$dir/djni.o" src/djni.c 2>&1 | tee "$dir/djni-warnings.txt"
+          echo "$(grep -c 'warning:' "$dir/djni-warnings.txt" || true) warnings"
+          echo "::endgroup::"
+          $cc -shared -fPIC -O2 -Wall -Wextra -Werror -o "$dir/dlrace.so" tests-integration/dlrace.c -ldl -lpthread
+          $cc -shared -fPIC -O2 -Wall -Wextra -Werror -DDLRACE_VICTIM -o "$dir/dlrace-victim.so" tests-integration/dlrace.c
+          LD_PRELOAD="$dir/dlrace.so" RJE_DLRACE="$dir/dlrace.so" RJE_DLRACE_VICTIM="$dir/dlrace-victim.so" \
+            Rscript --vanilla tests-integration/deferred.R race
+      - name: Remove hard links left in the JDK directories
+        if: always() && env.RJE_JAVA_HOME_A != ''
+        shell: bash
+        run: |
+          # A mapped DLL cannot be deleted, so Windows leaves them behind until here.
+          find "$RJE_JAVA_HOME_A/" "$RJE_JAVA_HOME_B/" -name 'rjava-alias-*' -print -delete
+      - name: Embed R in a Java host through JRI
+        if: runner.os != 'Windows'
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          Rscript --vanilla tests-integration/jri.R
+          env RJE_JAVA_HOME_A="$RJE_JAVA_HOME_B" RJE_JAVA_HOME_B="$RJE_JAVA_HOME_A" Rscript --vanilla tests-integration/jri.R
+      - name: Check Windows DLL search state after loads
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/dll-search"
+          server="$(dirname "$(Rscript --vanilla -e 'cat(rJava:::.find.jvm.library(Sys.getenv("RJE_JAVA_HOME_A"))[1])')")"
+          mkdir -p "$work/missing/bin/server" "$work/copy/bin/server"
+          cp "$server/jvm.dll" "$work/copy/bin/server/"
+          cp "$(dirname "$server")"/*.dll "$work/copy/bin/"
+          marker="$(dirname "$server")/java.dll"
+          cp "$marker" "$work/missing/bin/rjava_marker.dll"
+          cp "$marker" "$work/copy/bin/rjava_marker.dll"
+          gcc -Isrc -o "$work/dll-search.exe" tests-integration/dll-search.c -lversion
+          w() { cygpath -w "$1"; }
+          PATH="/c/Windows/System32:/c/Windows" "$work/dll-search.exe" \
+            "$(w "$work/missing/bin/server/jvm.dll")" "$(w "$work/copy/bin/server/jvm.dll")" "$(w "$work/missing/bin")"
+      - name: Keep Windows JRI outside the deferred-loading proposal
+        if: runner.os == 'Windows'
+        shell: Rscript {0}
+        run: |
+          stopifnot(!file.exists(system.file("jri", "JRI.jar", package="rJava")))
+      - name: Reject the unsupported static-loader option
+        if: runner.os == 'Linux' && matrix.set == 'current'
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/disable-dynload"
+          mkdir -p "$work"
+          tar -xzf "$RUNNER_TEMP"/rJava_*.tar.gz -C "$work"
+          cd "$work/rJava"
+          if ./configure --disable-dynload > configure-disable.log 2>&1; then
+            cat configure-disable.log
+            echo '::error::--disable-dynload unexpectedly succeeded'; exit 1
+          fi
+          cat configure-disable.log
+          grep -F -- '--disable-dynload is no longer supported' configure-disable.log
+      - uses: actions/checkout@v4
+        if: matrix.downstream
+        with:
+          repository: e-kotov/rJavaEnv
+          ref: 693b87c67f8c521388c3fd8627c8afbc29d8766a
+          path: downstream-source
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        if: matrix.downstream
+        with:
+          working-directory: downstream-source
+          dependencies: '"hard"'
+          extra-packages: any::callr
+          install-quarto: false
+      - name: Test installed rJavaEnv and downstream packages with dynamic rJava
+        if: matrix.downstream
+        working-directory: downstream-source
+        shell: Rscript {0}
+        run: source("tools/test-downstream.R")
+      - name: Install xlsx test dependencies in a separate library
+        if: matrix.downstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          Rscript tests-integration/xlsx-install.R "$RUNNER_TEMP/xlsx-lib" "$RUNNER_TEMP/xlsx-src"
+          {
+            echo "RJE_RJAVA_LIB=$R_LIBS"
+            echo "R_LIBS=$R_LIBS${{ runner.os == 'Windows' && ';' || ':' }}$RUNNER_TEMP/xlsx-lib"
+          } >> "$GITHUB_ENV"
+      - name: Start Java from a CRAN package's .onLoad (xlsx)
+        if: matrix.downstream
+        shell: bash
+        run: Rscript --vanilla tests-integration/xlsx.R
+      - name: Check the CRAN xlsx package and its tests with dynamic rJava
+        if: matrix.downstream
+        shell: bash
+        env:
+          _R_CHECK_FORCE_SUGGESTS_: 'false'
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/xlsx-src"
+          # JDK B is not the build JDK on PATH. NOAWT makes rJava set AWT headless.
+          JAVA_HOME="$RJE_JAVA_HOME_B" R CMD check --no-manual --ignore-vignettes xlsx_*.tar.gz
+          cat xlsx.Rcheck/tests/testthat.Rout* | tail -n 20
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dynamic-${{ matrix.os }}-${{ matrix.set }}
+          path: |
+            ${{ runner.temp }}/rJava_*.tar.gz
+            ${{ runner.temp }}/linkage.txt
+  musl:
+    if: github.event_name != 'workflow_dispatch' || !inputs.windows_comparison
+    # musl libc with Alpine's R and OpenJDK packages. Docker runs the same
+    # script on x86_64 and arm64 hosts; the container root is overlayfs on the
+    # runner's kernel, as in a typical Docker deployment.
+    name: alpine ${{ matrix.arch }} ${{ matrix.set }} (openjdk ${{ matrix.a }}, openjdk ${{ matrix.b }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04, set: legacy, a: '8', b: '11' }
+          - { arch: x86_64, runner: ubuntu-24.04, set: current, a: '17', b: '21' }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, set: current, a: '17', b: '21' }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Verify the upstream candidate runtime sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$UPSTREAM_CANDIDATE"
+          git diff --exit-code "$UPSTREAM_CANDIDATE" HEAD -- NEWS R src man configure configure.ac configure.win
+          echo "Runtime sources match upstream candidate $UPSTREAM_CANDIDATE"
+      - name: Check deferred loading, JRI and host attachment on musl
+        env:
+          # alpine:3.24.2
+          IMAGE: alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+        run: |
+          docker run --rm -v "$PWD:/src:ro" "$IMAGE" \
+            sh -c 'apk add --no-cache bash && exec bash /src/tests-integration/musl.sh "$1" "$2" "$3"' \
+            sh '${{ matrix.a }}' '${{ matrix.b }}' '${{ matrix.arch }}'
+  windows-comparison:
+    if: github.event_name == 'workflow_dispatch' && inputs.windows_comparison
+    name: Windows comparison (R ${{ matrix.r }}, ${{ matrix.dist }} ${{ matrix.java }})
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        r: ['release', '4.5']
+        runtime: [legacy, current, vendor]
+        include:
+          - { runtime: legacy, java: '8', dist: temurin }
+          - { runtime: current, java: '21', dist: temurin }
+          - { runtime: vendor, java: '25', dist: zulu }
+    env:
+      NOAWT: '1'
+      RJE_TEST_JDK_VERSION: ${{ matrix.java }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.r }}
+          rtools-version: '45'
+      - name: Parse comparison scripts before building
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$env:GITHUB_WORKSPACE/tests-integration/windows-compare.ps1", [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count) { $parseErrors | Write-Error; exit 1 }
+      - uses: actions/setup-java@v5
+        id: target-java
+        with:
+          distribution: ${{ matrix.dist }}
+          java-version: ${{ matrix.java }}
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build combined candidate, master, and isolated Windows controls
+        shell: bash
+        run: bash tests-integration/windows-compare-build.sh
+      - name: Compare startup, late native loads, host attachment and JRI
+        shell: pwsh
+        env:
+          RJE_JAVA_HOME_TEST: ${{ steps.target-java.outputs.path }}
+        run: ./tests-integration/windows-compare.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-comparison-R-${{ matrix.r }}-${{ matrix.dist }}-${{ matrix.java }}
+          path: |
+            ${{ runner.temp }}/rjava-windows-comparison/logs
+            ${{ runner.temp }}/rjava-windows-comparison/results.*
+            ${{ runner.temp }}/rjava-windows-comparison/summary.md
+            ${{ github.workspace }}/hs_err_pid*.log
