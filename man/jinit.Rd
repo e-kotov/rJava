@@ -129,8 +129,10 @@
   If a JVM library is already mapped into the process, a JVM library
   path, such as one given to \code{.jloadJVM}, selects it only if it
   names that same file, also when a JVM was created in it. Automatic
-  selection by \code{.jinit} adopts the mapped image without opening its
-  recorded path and warns if Java discovery selects a different path.
+  selection by \code{.jinit} adopts the mapped image without loading another
+  JVM and, after successful selection, warns if Java discovery selects a
+  different path. Loader lookups may inspect the recorded path when acquiring
+  a reference to the mapped image.
   To select another JVM, start a new R process before loading packages
   that map a JVM library.
 
