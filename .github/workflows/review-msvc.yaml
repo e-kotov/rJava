@@ -26,7 +26,7 @@ jobs:
         run: |
           $root = Join-Path $env:RUNNER_TEMP 'oldjdk'; New-Item -ItemType Directory -Force $root | Out-Null
           $map = [ordered]@{}
-          foreach ($tag in 'jdk8u392-b08', 'jdk-11.0.21+9', 'jdk-17.0.9+9', 'jdk-21.0.1+12') {
+          foreach ($tag in 'jdk8u392-b08', 'jdk-11.0.21+9', 'jdk-17.0.8+7', 'jdk-21.0.1+12') {
             $zip = Join-Path $root "$($tag -replace '\+','_').zip"
             Invoke-WebRequest "https://api.adoptium.net/v3/binary/version/$([uri]::EscapeDataString($tag))/windows/x64/jdk/hotspot/normal/eclipse" -OutFile $zip
             $dest = Join-Path $root ($tag -replace '\+','_'); Expand-Archive $zip $dest
