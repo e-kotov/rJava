@@ -1,0 +1,73 @@
+name: Review - JavaGD and JAVA_HOME compatibility
+on:
+  push:
+    branches: [claude/upbeat-edison-pdd0gd]
+jobs:
+  javagd:
+    name: ${{ matrix.os }} JavaGD
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      NOAWT: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+          use-public-rspm: true
+      - { uses: actions/setup-java@v5, id: j21, with: { distribution: temurin, java-version: '21' } }
+      - { uses: actions/setup-java@v5, id: j17, with: { distribution: temurin, java-version: '17' } }
+      - name: Register Temurin 17 with R (javareconf)
+        shell: bash
+        run: |
+          echo "export PATH=$PATH" > reconf.sh; echo "export JAVA_HOME=$JAVA_HOME" >> reconf.sh; echo "R CMD javareconf" >> reconf.sh
+          sudo bash reconf.sh > reconf.log 2>&1 || { cat reconf.log; exit 1; }
+          R CMD config JAVA_HOME; grep -i java "$(R RHOME)/etc/ldpaths" || true
+      - name: Build master and exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          work=$RUNNER_TEMP/review; mkdir -p $work/{sources,logs} $work/lib/{master,candidate,javagd}
+          for v in master candidate; do
+            ref=c5834c8efa6c97239f9f922d5bdedd8e143cf30a; [[ $v == master ]] && ref=534ff33499641619e3ca3ac7d573d953613d0102
+            d=$work/sources/$v; mkdir -p $d; git archive $ref | tar -x -C $d; cp -a src/jri/REngine $d/src/jri/
+            (cd $d && sh mkdist > $work/logs/build-$v.log 2>&1) || { cat $work/logs/build-$v.log; exit 1; }
+            R CMD INSTALL --library=$work/lib/$v $(ls $work/sources/rJava_*.tar.gz) > $work/logs/install-$v.log 2>&1 || { cat $work/logs/install-$v.log; exit 1; }
+            rm $work/sources/rJava_*.tar.gz; echo "BUILT $v $ref"
+          done
+      - name: Install JavaGD as users get it (CRAN binary on macOS, source on Linux)
+        shell: bash
+        run: |
+          work=$RUNNER_TEMP/review
+          type=source; [[ $RUNNER_OS == macOS ]] && type=binary
+          Rscript -e ".libPaths(c('$work/lib/master', .libPaths())); install.packages('JavaGD', lib='$work/lib/javagd', type='$type', dependencies=FALSE, repos='https://cloud.r-project.org')"
+          f=$(ls $work/lib/javagd/JavaGD/libs/JavaGD.so); if [[ $RUNNER_OS == macOS ]]; then otool -L $f; otool -l $f | grep -A2 LC_RPATH || echo "no LC_RPATH"; else ldd $f | grep -i jvm; readelf -d $f | grep -iE 'needed|path'; fi
+      - name: Compare master and candidate
+        shell: bash
+        run: |
+          work=$RUNNER_TEMP/review; j21='${{ steps.j21.outputs.path }}'; summary=()
+          for v in master candidate; do
+            for scen in rjava javagd; do
+              for jh in unset reconf j21; do
+                case $jh in unset) envs=(env -u JAVA_HOME);; reconf) envs=(env JAVA_HOME="$(R CMD config JAVA_HOME)");; j21) envs=(env JAVA_HOME="$j21");; esac
+                echo "::group::$v $scen JAVA_HOME=$jh"
+                set +e; "${envs[@]}" Rscript --vanilla review/javagd.R $work/lib/$v $work/lib/javagd $scen 2>&1 | tee $work/logs/$v-$scen-$jh.log; code=${PIPESTATUS[0]}; set -e
+                echo "::endgroup::"
+                res=$(grep -o 'RESULT|[A-Z]*|*[a-z]*' $work/logs/$v-$scen-$jh.log | tail -1)
+                summary+=("| $RUNNER_OS | $v | $scen | $jh | ${res:-exit $code} |")
+              done
+            done
+          done
+          { echo "| os | build | scenario | JAVA_HOME | result |"; echo "|---|---|---|---|---|"; printf '%s\n' "${summary[@]}"; } | tee -a $GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: review-javagd-${{ matrix.os }}
+          path: ${{ runner.temp }}/review/logs
