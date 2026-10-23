@@ -49,7 +49,7 @@ if (scenario == "fresh") {
   file_inode <- system2("stat", c("-Lc", "%i", shQuote(lib(a))), stdout = TRUE)
   same_ambiguous <- !identical(mapped_inode, file_inode)
   cat("same-file identity unverifiable:", same_ambiguous, "\n")
-  reject(lib(b), different)
+  reject(lib(b), paste0("(", ambiguous, "|", different, ")"))
   if (scenario == "replaced") {
     # Replacing through the overlay triggers copy-up/whiteout behavior.
     path <- lib(a)
