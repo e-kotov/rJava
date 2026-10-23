@@ -144,6 +144,14 @@
   verified, explicit selection fails; attaching to an existing VM remains
   possible without a pathname comparison.
 
+  On Windows, rJava retains MSVC runtime DLLs used by the selected JDK so
+  later native Java loads can use its bundled copies even when system
+  copies are absent or older. An already loaded runtime keeps precedence;
+  otherwise the JDK's bundled copy is preferred, with System32 as fallback
+  when a bundled copy is absent. No persistent change to \code{PATH} or
+  DLL search directories is made. A JDK that omits a required runtime may
+  still need a suitable system redistributable.
+
   NOTE: \code{.jinit()} can be called implicitly by other functions such
   as \code{\link{.jpackage}} or \code{\link{J}}.
 }

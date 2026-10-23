@@ -16,7 +16,9 @@
    the mapped file, whether or not it has created a VM. */
 int djni_load(const char *path);
 /* Selects the only JVM library mapped into the process if it has created a
-   VM, by its mapped image: no path is interpreted and no JVM is loaded. */
+   VM, by its mapped image: no path is interpreted and no JVM is loaded.
+   On Windows, selection and attachment retain the selected JDK's MSVC
+   runtime dependencies for subsequent native Java loads. */
 int djni_attach(void);
 int djni_unload(void);
 const char* djni_last_error(void);
