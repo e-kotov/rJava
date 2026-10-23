@@ -21,10 +21,19 @@ jobs:
         with:
           r-version: ${{ matrix.r }}
           rtools-version: '45'
-      - { uses: actions/setup-java@v5, id: o8,  with: { distribution: temurin, java-version: '8.0.392+8' } }
-      - { uses: actions/setup-java@v5, id: o11, with: { distribution: temurin, java-version: '11.0.21+9' } }
-      - { uses: actions/setup-java@v5, id: o17, with: { distribution: temurin, java-version: '17.0.9+9' } }
-      - { uses: actions/setup-java@v5, id: o21, with: { distribution: temurin, java-version: '21.0.1+12' } }
+      - name: Download older Temurin releases (pinned tags)
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'oldjdk'; New-Item -ItemType Directory -Force $root | Out-Null
+          $map = [ordered]@{}
+          foreach ($tag in 'jdk8u392-b08', 'jdk-11.0.21+9', 'jdk-17.0.9+9', 'jdk-21.0.1+12') {
+            $zip = Join-Path $root "$($tag -replace '\+','_').zip"
+            Invoke-WebRequest "https://api.adoptium.net/v3/binary/version/$([uri]::EscapeDataString($tag))/windows/x64/jdk/hotspot/normal/eclipse" -OutFile $zip
+            $dest = Join-Path $root ($tag -replace '\+','_'); Expand-Archive $zip $dest
+            $home_ = (Get-ChildItem $dest -Directory | Select-Object -First 1).FullName
+            $map["temurin-$tag"] = $home_ -replace '\\','/'
+          }
+          "REVIEW_JDKS=$($map | ConvertTo-Json -Compress)" | Out-File -Append $env:GITHUB_ENV
       - { uses: actions/setup-java@v5, id: t17, with: { distribution: temurin, java-version: '17' } }
       - uses: ilammy/msvc-dev-cmd@v1
       - name: Build master, exact candidate and review variant
@@ -42,9 +51,6 @@ jobs:
         shell: pwsh
         env:
           REVIEW_SKIP_MISSING: '1'
-          REVIEW_JDKS: >-
-            {"temurin8u392":"${{ steps.o8.outputs.path }}","temurin11.0.21":"${{ steps.o11.outputs.path }}",
-             "temurin17.0.9":"${{ steps.o17.outputs.path }}","temurin21.0.1":"${{ steps.o21.outputs.path }}"}
         run: |
           $env:R_HOME_DIR = (Rscript --vanilla -e 'cat(R.home())')
           $env:REVIEW_JDKS = $env:REVIEW_JDKS -replace '\\', '/'
