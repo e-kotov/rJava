@@ -4,7 +4,7 @@
 ##
 ## $Id$
 
-.check.JVM <- function()
+.check.JVM <- function() 
     .Call(RJava_checkJVM)
 .need.init <- function()
     .Call(RJava_needs_init)
@@ -72,7 +72,7 @@
     if (length(classpath))
       classpath <- paste(classpath,collapse=path.sep)
   }
-
+  
   # merge CLASSPATH environment variable if present
   cp<-Sys.getenv("CLASSPATH")
   if (!is.null(cp)) {
@@ -81,7 +81,7 @@
     else
       classpath<-paste(classpath,cp,sep=path.sep)
   }
-
+  
   # set rJava/java/boot for boostrap (so we can get RJavaClassLoader)
   boot.classpath <- file.path(.rJava.base.path,"java","boot")
 
@@ -115,7 +115,7 @@
   # this should remove any lingering .jclass objects from the global env
   # left there by previous versions of rJava
   pj <- grep("^\\.jclass",ls(1,all.names=TRUE),value=TRUE)
-  if (length(pj)>0) {
+  if (length(pj)>0) { 
     rm(list=pj,pos=1)
     if (exists(".jniInitialized",1)) rm(list=".jniInitialized",pos=1)
     if (!silent) warning("rJava found hidden Java objects in your workspace. Internal objects from previous versions of rJava were deleted. Please note that Java objects cannot be saved in the workspace.")
@@ -184,12 +184,12 @@
     cpc <- unique(strsplit(classpath, .Platform$path.sep)[[1]])
     if (length(cpc)) .jaddClassPath(cpc)
   } else stop("Unable to create a Java class loader.")
-
+  
   ##.Call(RJava_new_class_loader, .rJava.base.path, file.path(.rJava.base.path, lib))
 
   ## lock namespace bindings
   for (x in .delayed.variables) lockBinding(x, .env)
-
+  
   ## now we need to update the attached namespace (package env)  as well
   m <- match(paste("package", getNamespaceName(.env), sep = ":"), search())[1]
   if (!is.na(m)) { ## only is it is attached
@@ -200,15 +200,15 @@
       lockBinding(x, pe)
     }
   }
-
-  # FIXME: is this the best place or should this be done
+  
+  # FIXME: is this the best place or should this be done 
   #        internally right after the RJavaClassLoader is instantiated
   # init the cached RJavaTools class in the jni side
   .Call(initRJavaTools)
-
+  
   # not yet
   # import( c( "java.lang", "java.util") )
-
+  
   invisible(xr)
 }
 
@@ -252,7 +252,7 @@
 
     ar <- .jcall("java/lang/reflect/Array", "Ljava/lang/Object;",
                  "newInstance", .jclassObject, 1:1)
-
+    
     for (fn in rcp) {
       f <- .jnew("java/io/File", fn)
       url <- .jcall(f, "Ljava/net/URL;", "toURL")

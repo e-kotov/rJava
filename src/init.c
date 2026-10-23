@@ -122,7 +122,7 @@ static int initJVM(const char *user_classpath, int opts, char **optv, int hooks,
   vm_args.version = JNI_VERSION_1_2;
   if((res = JNI_GetDefaultJavaVMInitArgs(&vm_args)) != JNI_OK) {
     if (res == JNI_NO_DJNI) /* DJNI has not loaded a run-time yet */
-      error("No Java run-time is not loaded.");
+      error("No Java run-time is loaded.");
     error("JNI 1.2 or higher is required");
     return -1;
   }
@@ -775,22 +775,6 @@ REP SEXP RinitJVM(SEXP par) {
     return RinitJVM_jsw(par);
 #endif
 }
-
-/* detaches (if only attached) or destroys (if created) JVM */
-HIDE void destroyJVM(void) {
-    if (!jvm)
-	return;
-    if (rJava_JVM_state == JVM_STATE_CREATED ||
-	rJava_JVM_state == JVM_STATE_ATTACHED) {
-	(*jvm)->DetachCurrentThread(jvm);
-	if (rJava_JVM_state == JVM_STATE_CREATED)
-	    (*jvm)->DestroyJavaVM(jvm);
-	jvm = 0;
-	eenv = 0;
-	rJava_JVM_state = (rJava_JVM_state == JVM_STATE_CREATED) ? JVM_STATE_DESTROYED : JVM_STATE_DETACHED;
-    }
-}
-
 
 /**
  * Initializes the cached values of classes and methods used internally

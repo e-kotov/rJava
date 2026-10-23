@@ -6,7 +6,9 @@
 	the namespace loads. The first .jinit() selects one: a JVM
 	already created in the process, then java.home (Windows) or
 	JAVA_HOME, the JavaSoft registry (Windows),
-	/usr/libexec/java_home (macOS), and java on PATH. Until a
+	/usr/libexec/java_home (macOS), R CMD config JAVA_HOME (Linux),
+	and java on PATH. Linux thus retains the javareconf JDK as its
+	default when JAVA_HOME is unset. Until a
 	library is loaded, a failed .jinit() can be retried after
 	correcting the setting. .jloadJVM() selects a library by path;
 	.jvmState() reports "not-loaded" before any selection.
@@ -15,7 +17,10 @@
 	process: .junloadJVM() fails once one is loaded, and another
 	run-time requires a new R process. A JVM library already mapped
 	into the process is selected only by a path naming the same
-	file; any other is refused before it is loaded.
+	file; a different or unverifiable file is refused before it is
+	loaded. Device mismatches on btrfs and overlayfs are not evidence
+	of a different file: matching inodes also require a loader
+	reference to the same image, without loading another library.
 
     o	If native code in the process (e.g. a Java application that
 	embeds R through JRI) has created a VM, .jinit() attaches to it
@@ -28,6 +33,11 @@
 	LD_LIBRARY_PATH when R started can be used; selecting another
 	is refused, and the refused library stays mapped, so a new R
 	process is needed (see ?.jinit).
+
+    o	JVM loading is now always dynamic. --enable-dynload defaults to
+	yes; --disable-dynload is rejected instead of silently producing
+	a dynamic build under --as-needed. RJAVA_FORCE_LOAD is no longer
+	used, since namespace loading never requires a JVM.
 
 
 1.0-18	2026-04-08

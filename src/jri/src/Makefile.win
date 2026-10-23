@@ -1,5 +1,4 @@
 # Windows-specific part of the Makefile
-.DEFAULT_GOAL := all
 
 include $(R_HOME)/etc$(R_ARCH)/Makeconf
 include Makefile.wconf

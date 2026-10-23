@@ -18,7 +18,6 @@
 #elif defined(__linux__)
 #include <link.h>
 #include <sys/sysmacros.h>
-#include <sys/vfs.h>
 #endif
 #endif
 #include <stdint.h>
@@ -278,68 +277,6 @@ static int created_vms(HMODULE module) {
     created = (JNI_GetCreatedJavaVMs_fnptr) GetProcAddress(module, "JNI_GetCreatedJavaVMs");
     return created && created(&vm, 1, &count) == JNI_OK ? (int) count : -1;
 }
-/* Keep already loaded runtimes alive; otherwise prefer the selected JDK's
-   own set, as java.exe does. Only a missing bundled copy falls back to
-   System32. References last until process exit, without changing PATH or
-   retaining a DLL search directory. Optional load failures are diagnosed. */
-static void load_bundled_msvc(void) {
-    static const wchar_t *names[] = {
-        L"vcruntime140.dll", L"vcruntime140_1.dll", L"msvcp140.dll",
-        L"msvcp140_1.dll", L"msvcp140_2.dll", L"msvcp140_atomic_wait.dll"
-    };
-    static HMODULE retained[sizeof(names) / sizeof(names[0])];
-    wchar_t *path = module_path(jni_dl), *slash, *candidate;
-    size_t i, len;
-    if (!path) {
-        fprintf(stderr, "rJava: cannot determine the selected JVM's MSVC runtime directory (Windows error %lu).\n", (unsigned long) GetLastError());
-        return;
-    }
-    slash = wcsrchr(path, L'\\');
-    if (!slash) { free(path); return; }
-    *slash = 0; /* bin\server */
-    slash = wcsrchr(path, L'\\');
-    if (!slash) { free(path); return; }
-    *slash = 0; /* bin */
-    len = wcslen(path);
-    candidate = malloc(sizeof(wchar_t) * (len + 64));
-    if (candidate) {
-        for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-            DWORD attrs, error;
-            char *name;
-            if (retained[i]) continue;
-            /* Unlike GetModuleHandleW, this owns a reference even if the
-               component that originally loaded the runtime is unloaded. */
-            if (GetModuleHandleExW(0, names[i], &retained[i])) continue;
-            wcscpy(candidate, path);
-            candidate[len] = L'\\';
-            wcscpy(candidate + len + 1, names[i]);
-            attrs = GetFileAttributesW(candidate);
-            error = attrs == INVALID_FILE_ATTRIBUTES ? GetLastError() : 0;
-            if (error && error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
-                name = to_utf8(candidate);
-                fprintf(stderr, "rJava: cannot inspect bundled MSVC runtime %s (Windows error %lu).\n",
-                        name ? name : "(unknown path)", (unsigned long) error);
-                free(name);
-                continue;
-            }
-            if (attrs != INVALID_FILE_ATTRIBUTES)
-                retained[i] = LoadLibraryExW(candidate, NULL,
-                    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-            else
-                retained[i] = LoadLibraryExW(names[i], NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
-            if (retained[i]) continue;
-            error = GetLastError();
-            /* A JDK need not use every optional runtime in the list. */
-            if (attrs == INVALID_FILE_ATTRIBUTES && error == ERROR_MOD_NOT_FOUND) continue;
-            name = to_utf8(attrs != INVALID_FILE_ATTRIBUTES ? candidate : names[i]);
-            fprintf(stderr, "rJava: cannot retain MSVC runtime %s (Windows error %lu); later Java native loads may fail.\n",
-                    name ? name : "(unknown path)", (unsigned long) error);
-            free(name);
-        }
-        free(candidate);
-    } else fprintf(stderr, "rJava: cannot prepare MSVC runtimes: out of memory.\n");
-    free(path);
-}
 static int load_library(const char *path) {
     wchar_t *wide = NULL, *full = NULL, *bin = NULL, *slash;
     struct jvm_image *jvms = NULL;
@@ -480,7 +417,8 @@ const char *djni_mapped(int *vms) {
    the loader recorded is not used: the file there may have been deleted or
    replaced since, while the mapping keeps the old file. Returns 1 for the
    same file, 0 for another or no file, -1 if the mapped file is unknown, and
-   -2 on overlayfs, where a mismatch proves nothing (below). */
+   -2 for mismatched devices, where an inode mismatch proves nothing, and
+   2 for matching inodes on mismatched devices, requiring a loader check. */
 static int same_as_mapped(const void *addr, const char *path) {
     struct stat s;
     int res = -1;
@@ -503,24 +441,24 @@ static int same_as_mapped(const void *addr, const char *path) {
         size_t size = 0;
         unsigned long long a = (uintptr_t) addr, start, end, ino;
         unsigned int maj = 0, min = 0;
-        int device_mismatch = 0;
-        struct statfs fs;
+        int device_mismatch;
         if (f) {
             while (getline(&line, &size, f) > 0)
                 if (sscanf(line, "%llx-%llx %*s %*s %x:%x %llu", &start, &end, &maj, &min, &ino) == 5 &&
                     a >= start && a < end) {
                     if (ino) {
                         device_mismatch = major(s.st_dev) != maj || minor(s.st_dev) != min;
-                        res = !device_mismatch && (unsigned long long) s.st_ino == ino;
+                        res = device_mismatch ? ((unsigned long long) s.st_ino == ino ? 2 : -2) :
+                            (unsigned long long) s.st_ino == ino;
                     }
                     break;
                 }
             free(line);
             fclose(f);
         }
-        /* Some overlayfs kernels report a layer file in /proc/self/maps,
-           while stat() reports the overlay identity. A mismatch is ambiguous. */
-        if (!res && device_mismatch && !statfs(path, &fs) && fs.f_type == 0x794c7630) res = -2;
+        /* btrfs reports a subvolume device to stat(), but the superblock
+           device in maps. Overlayfs may report a layer's inode as well.
+           Neither device mismatch establishes that this is another file. */
     }
 #endif
     return res;
@@ -666,6 +604,7 @@ static int phdr_image(struct dl_phdr_info *info, size_t size, void *data) {
     uintptr_t fn, addr = 0, created = 0;
     size_t i;
     int jvm, owned;
+    (void) size;
     if (!info->dlpi_name || !*info->dlpi_name) return 0; /* the executable */
     for (i = 0; i < e.phnum; i++) {
         const ElfW(Phdr) *ph = &e.phdr[i];
@@ -824,10 +763,23 @@ static int find_jvms(struct jvm_image **out) {
 static int created_vms(const struct jvm_image *im) {
     JavaVM *vm;
     jsize count = 0;
+    JNI_GetCreatedJavaVMs_fnptr created = im->created;
 #if !defined(__linux__) || defined(__GLIBC__) || defined(__BIONIC__)
     if (!im->handle) return -1;
 #endif
-    return im->created && im->created(&vm, 1, &count) == JNI_OK ? (int) count : -1;
+#ifdef __linux__
+    /* Resolve from the held image, rather than calling an address saved
+       before the reference was acquired. A library may have been unmapped
+       and another mapped at the same address in that interval. */
+    if (im->handle) {
+        Dl_info info;
+        void *symbol = dlsym(im->handle, "JNI_GetCreatedJavaVMs");
+        created = symbol && dladdr(symbol, &info) && info.dli_fbase == im->addr ?
+            (JNI_GetCreatedJavaVMs_fnptr) symbol : NULL;
+        dlerror();
+    }
+#endif
+    return created && created(&vm, 1, &count) == JNI_OK ? (int) count : -1;
 }
 static void use_new_process(void) {
     size_t n = strlen(last_error);
@@ -848,6 +800,18 @@ static int load_library(const char *path) {
            also once a VM was created: djni_attach() attaches without a path. */
         int same = same_as_mapped(jvms[0].addr, path);
 #ifdef __linux__
+        if (same == 2) {
+            /* A matching inode alone is insufficient across devices. Ask
+               the loader whether this path already names this exact image;
+               RTLD_NOLOAD never maps the requested file or its dependencies.
+               Retain that reference so no second JVM is loaded. */
+            void *handle = reference(jvms[0].dyn, path);
+            if (handle) {
+                if (jvms[0].handle) dlclose(jvms[0].handle);
+                jvms[0].handle = handle;
+                same = 1;
+            } else same = -2;
+        }
         /* The path names the mapped file, so it opens the image if the
            names find_jvms() tried no longer do. */
         if (same == 1 && !jvms[0].handle) jvms[0].handle = reference(jvms[0].dyn, path);
@@ -855,7 +819,7 @@ static int load_library(const char *path) {
         if (!same)
             snprintf(last_error, sizeof(last_error), "Another JVM library is already mapped: %s. Use a new R process.", jvms[0].name);
         else if (same == -2)
-            snprintf(last_error, sizeof(last_error), "Cannot verify that %s is the JVM library already mapped: %s, because the overlayfs mapping identity cannot be verified. Use a new R process.",
+            snprintf(last_error, sizeof(last_error), "Cannot verify that %s is the JVM library already mapped: %s, because the filesystem mapping identity cannot be verified. Use a new R process.",
                      path, jvms[0].name);
         else if (same < 0)
             snprintf(last_error, sizeof(last_error), "Cannot verify that %s is the JVM library already mapped: %s. Use a new R process.", path, jvms[0].name);
@@ -988,9 +952,6 @@ int djni_load(const char *path) {
     /* After load_syms(), so that a library that is no JVM is reported as such. */
     if (!res && (res = check_jvm_name(path))) djni_unload();
 #endif
-#ifdef _WIN32
-    if (!res) load_bundled_msvc();
-#endif
     return res;
 }
 /* returns: 0 = success, -1 = already loaded, -3 = symbols not found, -4 = no
@@ -1001,9 +962,6 @@ int djni_attach(void) {
     if (jni_dl) return -1;
     if ((res = attach_library())) return res;
     res = load_syms();
-#ifdef _WIN32
-    if (!res) load_bundled_msvc();
-#endif
     return res;
 }
 int djni_unload(void) {

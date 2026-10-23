@@ -1,6 +1,9 @@
 \name{jinit}
 \alias{.jinit}
 \alias{.jvmState}
+\alias{.jloadJVM}
+\alias{.junloadJVM}
+\alias{.jfindAndLoadJVM}
 \title{
   Initialize Java VM
 }
@@ -14,6 +17,9 @@
 .jinit(classpath = NULL, parameters = getOption("java.parameters", NA), ...,
        silent = FALSE, force.init = FALSE)
 .jvmState()
+.jloadJVM(path, silent = FALSE)
+.junloadJVM()
+.jfindAndLoadJVM()
 }
 \arguments{
   \item{classpath}{Any additional classes to include in the Java class
@@ -30,7 +36,10 @@
     currently. \code{NULL} is equivalent to \code{character()}.
   }
   \item{...}{Other optional Java initialization parameters (implementation-dependent).}
-  \item{silent}{If set to \code{TRUE} no warnings are issued.}
+  \item{path}{Path to a JVM run-time library for explicit selection.}
+  \item{silent}{If set to \code{TRUE} no initialization warnings are issued.
+    For \code{.jloadJVM}, return the native status code instead of signaling
+    a load error: zero means success and negative values mean failure.}
   \item{force.init}{If set to \code{TRUE} JVM is re-initialized even if
     it is already running.}
 }
@@ -101,7 +110,9 @@
   otherwise the \code{java.home} option (Windows only) or the
   \code{JAVA_HOME} environment variable; then, on Windows, the
   \code{CurrentVersion} of the JavaSoft registry keys; on macOS,
-  \code{/usr/libexec/java_home}; and finally the \code{java} executable
+  \code{/usr/libexec/java_home}; on Linux, the existing Java home reported
+  by \code{R CMD config JAVA_HOME} (set by \code{R CMD javareconf});
+  and finally the \code{java} executable
   found on \code{PATH}. A Java home setting that is not an existing
   directory is ignored with a warning. If no run-time can be found or
   loaded, \code{.jinit} fails and can be called again after correcting
@@ -118,6 +129,20 @@
   path, such as one given to \code{.jloadJVM}, selects it only if it
   names that same file, also when a JVM was created in it; attaching to
   a created JVM is done by \code{.jinit} without a path.
+
+  \code{.jloadJVM} selects a library without starting a VM and returns
+  \code{TRUE} on success, or a status code when \code{silent = TRUE}.
+  \code{.jfindAndLoadJVM} performs the automatic selection used by
+  \code{.jinit}. \code{.junloadJVM} returns \code{TRUE} if no library has
+  been selected and otherwise signals an error: unloading does not make
+  replacing a JVM in the same process safe.
+
+  On Linux, filesystem device numbers from \code{stat} and
+  \code{/proc/self/maps} can differ (e.g. btrfs subvolumes and overlayfs).
+  Matching inodes then also require the dynamic loader to confirm the
+  already mapped image without loading anything. If identity cannot be
+  verified, explicit selection fails; attaching to an existing VM remains
+  possible without a pathname comparison.
 
   NOTE: \code{.jinit()} can be called implicitly by other functions such
   as \code{\link{.jpackage}} or \code{\link{J}}.

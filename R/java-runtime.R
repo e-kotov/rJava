@@ -1,11 +1,12 @@
-## Deferred JVM discovery. This runs at the first .jinit() or .jloadJVM(),
+## Deferred JVM discovery. This runs at the first .jinit(),
 ## never at namespace load. The Java home is the first of:
 ##  1. getOption("java.home") (Windows only, as before) or JAVA_HOME; a value
 ##     that is not an existing directory is ignored with a warning, as rJava
 ##     did on Windows and macOS before deferred loading
 ##  2. on Windows, the CurrentVersion of the JavaSoft registry keys
 ##  3. on macOS, /usr/libexec/java_home
-##  4. the java.home property reported by `java` on PATH
+##  4. on Linux, R CMD config JAVA_HOME (the javareconf setting)
+##  5. the java.home property reported by `java` on PATH
 ## An existing Java home without a JVM library is an error, not a fallback.
 .find.java.runtime <- function() {
     windows <- .Platform$OS.type == "windows"
@@ -20,6 +21,10 @@
     if (!nzchar(javahome) && windows) javahome <- .find.java.registry()
     if (!nzchar(javahome) && file.exists("/usr/libexec/java_home"))
         javahome <- .java.output("/usr/libexec/java_home")
+    if (!nzchar(javahome) && identical(Sys.info()[["sysname"]], "Linux")) {
+        configured <- .java.output(file.path(R.home("bin"), "R"), c("CMD", "config", "JAVA_HOME"))
+        if (nzchar(configured) && dir.exists(configured)) javahome <- configured
+    }
     if (!nzchar(javahome))
         javahome <- .java.output("java", c("-cp", shQuote(system.file("java", package="rJava")), "getsp", "java.home"))
     if (nzchar(javahome) && dir.exists(javahome)) javahome else ""

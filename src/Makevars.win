@@ -26,3 +26,4 @@ PKG_CPPFLAGS = -D_R_ -DWin32 -Ijvm-w32 -I$(RHOME)/src/include $(JAVA_INCLUDES:%=
 PKG_LIBS = -Ljvm-w32
 
 $(warning PKG_CPPFLAGS are $(PKG_CPPFLAGS))
+

@@ -49,7 +49,14 @@ LibExtern int R_interrupts_pending;
 
 #ifdef Win32
 #include <windows.h>
-/* UserBreak is declared with DLL-import linkage in Rdecl.h / Rembedded.h. */
+#ifdef _MSC_VER
+__declspec(dllimport) int UserBreak;
+#else
+#ifndef WIN64
+#define UserBreak     (*_imp__UserBreak)
+#endif
+extern int UserBreak;
+#endif
 #else
 /* for R_runHandlers */
 #include <R_ext/eventloop.h>

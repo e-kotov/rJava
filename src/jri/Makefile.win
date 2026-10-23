@@ -1,5 +1,4 @@
 # Windows-specific part of the Makefile
-.DEFAULT_GOAL := windows.all
 
 include src/Makefile.wconf
 include Makevars.win

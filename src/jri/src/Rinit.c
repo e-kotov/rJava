@@ -124,7 +124,14 @@ extern __declspec(dllimport) uintptr_t R_CStackStart; /* Initial stack address *
 #define	SIGBREAK 21	/* to readers pgrp upon background tty read */
 
 /* one way to allow user interrupts: called in ProcessEvents */
-/* UserBreak is declared with DLL-import linkage in Rdecl.h / Rembedded.h. */
+#ifdef _MSC_VER
+__declspec(dllimport) int UserBreak;
+#else
+#ifndef WIN64
+#define UserBreak     (*_imp__UserBreak)
+#endif
+extern int UserBreak;
+#endif
 
 /* calls into the R DLL */
 extern char *getDLLVersion(void);
