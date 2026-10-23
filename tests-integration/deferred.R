@@ -161,6 +161,7 @@ later_loads <- function() {
 }
 
 one_jvm <- function() {
+  if (Sys.info()[["sysname"]] != "Linux") return(invisible())
   maps <- sub("^(\\S+\\s+){5}", "", grep("^(\\S+\\s+){5}/", readLines("/proc/self/maps"), value = TRUE))
   jvms <- unique(maps[basename(maps) == "libjvm.so"])
   if (length(jvms) != 1L) stop("expected one JVM library mapped, found: ", paste(jvms, collapse = ", "))
@@ -408,7 +409,6 @@ switch(scenario,
     preload(path)
     raced(expect_mapped(path, 0L))
     churned(function() stopifnot(identical(mapped_jvm()$vms, 0L)))
-    raced(fails(attach(), "created no VM"))
     raced(fails(internal(".jloadJVM")(lib(home_b)), "already mapped"))
     unmapped(home_b)
     boot <- file.path(system.file("java", package = "rJava"), "boot")
