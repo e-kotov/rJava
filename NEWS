@@ -40,6 +40,14 @@
 	used, since namespace loading never requires a JVM.
 
 
+    o	On Windows, retain the selected JDK's bundled MSVC runtime DLLs
+	for native libraries Java loads after startup or host attachment.
+	This also supports systems with missing or older system VC++
+	runtimes, without changing PATH or retaining a search directory.
+	Already loaded runtimes keep precedence; System32 is used when
+	a bundled copy is absent. Windows JRI build policy is unchanged.
+
+
 1.0-18	2026-04-08
     o	JRI: fix regression in 1.0-16 breaking older versions of R.
 

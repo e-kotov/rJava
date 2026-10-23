@@ -277,6 +277,68 @@ static int created_vms(HMODULE module) {
     created = (JNI_GetCreatedJavaVMs_fnptr) GetProcAddress(module, "JNI_GetCreatedJavaVMs");
     return created && created(&vm, 1, &count) == JNI_OK ? (int) count : -1;
 }
+/* Keep already loaded runtimes alive; otherwise prefer the selected JDK's
+   own set, as java.exe does. Only a missing bundled copy falls back to
+   System32. References last until process exit, without changing PATH or
+   retaining a DLL search directory. Optional load failures are diagnosed. */
+static void load_bundled_msvc(void) {
+    static const wchar_t *names[] = {
+        L"vcruntime140.dll", L"vcruntime140_1.dll", L"msvcp140.dll",
+        L"msvcp140_1.dll", L"msvcp140_2.dll", L"msvcp140_atomic_wait.dll"
+    };
+    static HMODULE retained[sizeof(names) / sizeof(names[0])];
+    wchar_t *path = module_path(jni_dl), *slash, *candidate;
+    size_t i, len;
+    if (!path) {
+        fprintf(stderr, "rJava: cannot determine the selected JVM's MSVC runtime directory (Windows error %lu).\n", (unsigned long) GetLastError());
+        return;
+    }
+    slash = wcsrchr(path, L'\\');
+    if (!slash) { free(path); return; }
+    *slash = 0; /* bin\server */
+    slash = wcsrchr(path, L'\\');
+    if (!slash) { free(path); return; }
+    *slash = 0; /* bin */
+    len = wcslen(path);
+    candidate = malloc(sizeof(wchar_t) * (len + 64));
+    if (candidate) {
+        for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+            DWORD attrs, error;
+            char *name;
+            if (retained[i]) continue;
+            /* Unlike GetModuleHandleW, this owns a reference even if the
+               component that originally loaded the runtime is unloaded. */
+            if (GetModuleHandleExW(0, names[i], &retained[i])) continue;
+            wcscpy(candidate, path);
+            candidate[len] = L'\\';
+            wcscpy(candidate + len + 1, names[i]);
+            attrs = GetFileAttributesW(candidate);
+            error = attrs == INVALID_FILE_ATTRIBUTES ? GetLastError() : 0;
+            if (error && error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
+                name = to_utf8(candidate);
+                fprintf(stderr, "rJava: cannot inspect bundled MSVC runtime %s (Windows error %lu).\n",
+                        name ? name : "(unknown path)", (unsigned long) error);
+                free(name);
+                continue;
+            }
+            if (attrs != INVALID_FILE_ATTRIBUTES)
+                retained[i] = LoadLibraryExW(candidate, NULL,
+                    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+            else
+                retained[i] = LoadLibraryExW(names[i], NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+            if (retained[i]) continue;
+            error = GetLastError();
+            /* A JDK need not use every optional runtime in the list. */
+            if (attrs == INVALID_FILE_ATTRIBUTES && error == ERROR_MOD_NOT_FOUND) continue;
+            name = to_utf8(attrs != INVALID_FILE_ATTRIBUTES ? candidate : names[i]);
+            fprintf(stderr, "rJava: cannot retain MSVC runtime %s (Windows error %lu); later Java native loads may fail.\n",
+                    name ? name : "(unknown path)", (unsigned long) error);
+            free(name);
+        }
+        free(candidate);
+    } else fprintf(stderr, "rJava: cannot prepare MSVC runtimes: out of memory.\n");
+    free(path);
+}
 static int load_library(const char *path) {
     wchar_t *wide = NULL, *full = NULL, *bin = NULL, *slash;
     struct jvm_image *jvms = NULL;
@@ -952,6 +1014,9 @@ int djni_load(const char *path) {
     /* After load_syms(), so that a library that is no JVM is reported as such. */
     if (!res && (res = check_jvm_name(path))) djni_unload();
 #endif
+#ifdef _WIN32
+    if (!res) load_bundled_msvc();
+#endif
     return res;
 }
 /* returns: 0 = success, -1 = already loaded, -3 = symbols not found, -4 = no
@@ -962,6 +1027,9 @@ int djni_attach(void) {
     if (jni_dl) return -1;
     if ((res = attach_library())) return res;
     res = load_syms();
+#ifdef _WIN32
+    if (!res) load_bundled_msvc();
+#endif
     return res;
 }
 int djni_unload(void) {
