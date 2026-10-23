@@ -45,7 +45,13 @@ same_home <- function(actual, expected) {
 }
 fails <- function(expr, pattern = NULL) {
   path <- Sys.getenv("PATH")
-  result <- suppressWarnings(try(expr, silent = TRUE))
+  warnings <- character()
+  result <- withCallingHandlers(try(expr, silent = TRUE), warning = function(w) {
+    warnings <<- c(warnings, conditionMessage(w))
+    invokeRestart("muffleWarning")
+  })
+  # Failed adoption must not claim that a JVM library is now in use.
+  stopifnot(!any(startsWith(warnings, "Using the JVM library already mapped")))
   stopifnot(inherits(result, "try-error"), state()$state == "not-loaded",
             identical(path, Sys.getenv("PATH")))
   if (!is.null(pattern) && !grepl(pattern, result))
@@ -211,23 +217,32 @@ switch(scenario,
     # Explicit selection rejects a different file. Automatic .jinit() adopts
     # the preloaded image, even with a conflicting or absent Java home. Global
     # JNI exports must not interpose on rJava's own loader wrappers.
-    stopifnot(variant %in% c("", "global", "unset"))
+    stopifnot(variant %in% c("", "global", "unset", "refused"))
     attach <- function() .Call(internal("RattachJVM"))
     fails(attach(), "No JVM library is mapped")
     preload(lib(home_a), local = variant != "global")
     mapped <- .Call(internal("RgetMappedJVM"))
     stopifnot(!is.null(mapped), identical(mapped$vms, 0L))
     fails(internal(".jloadJVM")(lib(home_b)), "already mapped")
-    if (variant == "unset") Sys.unsetenv("JAVA_HOME") else Sys.setenv(JAVA_HOME = home_b)
-    warned <- FALSE
-    withCallingHandlers(start(home_a), warning = function(w) {
-      if (grepl("already mapped", conditionMessage(w), fixed = TRUE)) warned <<- TRUE
-      log("warning:", conditionMessage(w))
-      invokeRestart("muffleWarning")
-    })
-    if (variant != "unset") stopifnot(warned)
-    unmapped(home_b)
-    one_jvm()
+    if (variant == "refused") {
+      # musl's startup search resolves libjvm.so to B, while A is mapped.
+      stopifnot(byname == "B")
+      Sys.setenv(JAVA_HOME = home_b)
+      fails(rJava::.jinit(), "libjvm.so by name")
+      unmapped(home_b)
+      expect_mapped(lib(home_a), 0L)
+    } else {
+      if (variant == "unset") Sys.unsetenv("JAVA_HOME") else Sys.setenv(JAVA_HOME = home_b)
+      warned <- FALSE
+      withCallingHandlers(start(home_a), warning = function(w) {
+        if (grepl("already mapped", conditionMessage(w), fixed = TRUE)) warned <<- TRUE
+        log("warning:", conditionMessage(w))
+        invokeRestart("muffleWarning")
+      })
+      if (variant != "unset") stopifnot(warned)
+      unmapped(home_b)
+      one_jvm()
+    }
   },
   alias = {
     # The mapped library must be recognized by file identity, not by name.

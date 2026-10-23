@@ -9,7 +9,7 @@ on:
         type: boolean
         default: false
 env:
-  UPSTREAM_CANDIDATE: 76d01fbac2080171cd9f37e02c6d9e9dc3851044
+  UPSTREAM_CANDIDATE: dbe0c72d263eb07aeefd8d1a5b81839452ec5ba7
 jobs:
   dynamic:
     if: github.event_name != 'workflow_dispatch' || !inputs.windows_comparison

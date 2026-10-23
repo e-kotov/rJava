@@ -102,6 +102,7 @@ for scenario in unload preloaded laterload hosted jengine; do run A "$scenario";
 run A hosted explicit
 run A preloaded global
 run A preloaded unset
+run B preloaded refused
 run B laterload b
 run A alias link
 run A alias spelling
